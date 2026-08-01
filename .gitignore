@@ -1,0 +1,23 @@
+# Build directories
+Debug/
+Release/
+build/
+
+# Object files, executables, and binaries
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+*.su
+*.d
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Optional IDE specific ignores
+# We will keep .project, .cproject, .mxproject, and .ioc as they are needed for import
+# But we can ignore .settings if we want, or keep it. It's often safer to ignore user-specific settings.
+.settings/
