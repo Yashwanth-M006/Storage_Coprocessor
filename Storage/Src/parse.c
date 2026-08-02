@@ -8,6 +8,7 @@
 #include "parse.h"
 #include <stdlib.h>
 #include "storage_main.h"
+#include "ftl.h"
 
 uint8_t type;
 
@@ -215,18 +216,28 @@ uint8_t Queue_Load_Config(master_frame_t *frame)
 
     /* ---------------- Validation ---------------- */
 
-    /* Validate partition_map (at least one non-zero 3-bit field) */
+    /* Validate partition_map */
     uint16_t map = out_config->partition_map;
+    uint8_t total_percent_units = 0;
+    uint32_t total_calculated_size = 0;
 
-    uint8_t valid = 0;
     for (int i = 0; i < QUEUE_TYPES; i++)
     {
         uint8_t percent = (map >> (i * 3)) & 0x07;
-        if (percent != 0)
-            valid = 1;
+        total_percent_units += percent;
+        
+        // Calculate the physical size this partition would take
+        uint32_t size = (FLASH_LOG_SIZE * (percent * 10)) / 100;
+        size = (size / FLASH_SECTOR_SIZE) * FLASH_SECTOR_SIZE;
+        total_calculated_size += size;
     }
 
-    if (!valid)
+    /* 1. Sum of partition percentages must equal exactly 100% (10 units of 10%) */
+    if (total_percent_units != 10)
+        return 0;
+
+    /* 2. Start addr + total calculated size must not exceed the physical flash limit */
+    if (FLASH_LOG_START + total_calculated_size > FLASH_TOTAL_SIZE)
         return 0;
 
     /* Validate max_log_size */
