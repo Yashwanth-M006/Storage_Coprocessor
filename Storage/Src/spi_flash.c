@@ -13,7 +13,7 @@
    External SPI Handle
 ============================== */
 
-//extern SPI_HandleTypeDef hspi1;
+extern SPI_HandleTypeDef hspi2;
 
 /* ==============================
    Flash CS Control
@@ -51,13 +51,13 @@ static volatile uint8_t spi_rx_done = 0;
 
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    if (hspi->Instance == SPI1)
+    if (hspi->Instance == SPI2)
         spi_tx_done = 1;
 }
 
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    if (hspi->Instance == SPI1)
+    if (hspi->Instance == SPI2)
         spi_rx_done = 1;
 }
 
@@ -82,7 +82,7 @@ static void Flash_Write_Enable(void)
     uint8_t cmd = CMD_WRITE_ENABLE;
 
     FLASH_CS_LOW();
-    HAL_SPI_Transmit_DMA(&hspi1, &cmd, 1);
+    HAL_SPI_Transmit_DMA(&hspi2, &cmd, 1);
     SPI_Wait_TX();
     FLASH_CS_HIGH();
 }
@@ -93,10 +93,10 @@ static uint8_t Flash_Read_Status(void)
     uint8_t status = 0;
 
     FLASH_CS_LOW();
-    HAL_SPI_Transmit_DMA(&hspi1, &cmd, 1);
+    HAL_SPI_Transmit_DMA(&hspi2, &cmd, 1);
     SPI_Wait_TX();
 
-    HAL_SPI_Receive_DMA(&hspi1, &status, 1);
+    HAL_SPI_Receive_DMA(&hspi2, &status, 1);
     SPI_Wait_RX();
     FLASH_CS_HIGH();
 
@@ -118,10 +118,10 @@ int Flash_Init(void)
     uint8_t id[3];
 
     FLASH_CS_LOW();
-    HAL_SPI_Transmit_DMA(&hspi1, &cmd, 1);
+    HAL_SPI_Transmit_DMA(&hspi2, &cmd, 1);
     SPI_Wait_TX();
 
-    HAL_SPI_Receive_DMA(&hspi1, id, 3);
+    HAL_SPI_Receive_DMA(&hspi2, id, 3);
     SPI_Wait_RX();
     FLASH_CS_HIGH();
 
@@ -139,10 +139,10 @@ int Flash_Read(uint32_t addr, uint8_t *data, uint32_t len)
 
     FLASH_CS_LOW();
 
-    HAL_SPI_Transmit_DMA(&hspi1, cmd, 4);
+    HAL_SPI_Transmit_DMA(&hspi2, cmd, 4);
     SPI_Wait_TX();
 
-    HAL_SPI_Receive_DMA(&hspi1, data, len);
+    HAL_SPI_Receive_DMA(&hspi2, data, len);
     SPI_Wait_RX();
 
     FLASH_CS_HIGH();
@@ -174,10 +174,10 @@ int Flash_Write(uint32_t addr, uint8_t *data, uint32_t len)
 
         FLASH_CS_LOW();
 
-        HAL_SPI_Transmit_DMA(&hspi1, cmd, 4);
+        HAL_SPI_Transmit_DMA(&hspi2, cmd, 4);
         SPI_Wait_TX();
 
-        HAL_SPI_Transmit_DMA(&hspi1, current_data, chunk);
+        HAL_SPI_Transmit_DMA(&hspi2, current_data, chunk);
         SPI_Wait_TX();
 
         FLASH_CS_HIGH();
@@ -204,7 +204,7 @@ int Flash_Erase_Sector(uint32_t addr)
 
     FLASH_CS_LOW();
 
-    HAL_SPI_Transmit_DMA(&hspi1, cmd, 4);
+    HAL_SPI_Transmit_DMA(&hspi2, cmd, 4);
     SPI_Wait_TX();
 
     FLASH_CS_HIGH();
@@ -221,7 +221,7 @@ int Flash_Chip_Erase(void)
     uint8_t cmd = CMD_CHIP_ERASE;
 
     FLASH_CS_LOW();
-    HAL_SPI_Transmit_DMA(&hspi1, &cmd, 1);
+    HAL_SPI_Transmit_DMA(&hspi2, &cmd, 1);
     SPI_Wait_TX();
     FLASH_CS_HIGH();
 

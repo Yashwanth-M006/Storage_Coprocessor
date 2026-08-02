@@ -23,6 +23,8 @@ int  Storage_Read(uint8_t log_type, uint8_t *out_buf, uint16_t *out_len);
 
 void getStatus(void);
 
+void Storage_Process_Read(read_request_t *req);
+
 void Storage_Process_Command(void);
 
 #endif /* INC_STORAGE_MAIN_H_ */

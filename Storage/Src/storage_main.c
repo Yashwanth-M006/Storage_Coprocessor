@@ -13,6 +13,9 @@
 #include "compression.h"
 #include "parse.h"
 
+extern SPI_HandleTypeDef hspi1;
+static uint8_t spi_tx_buffer[MAX_LOG_SIZE + sizeof(master_header_t) + 4]; // +4 for Payload CRC
+
 encryption_t encryption;
 compression_t compression;
 
@@ -65,6 +68,36 @@ void Storage_Process_Command()
                 Free_Overflow_Node(node);
             }
         }
+    }
+}
+
+void Storage_Process_Read(read_request_t *req)
+{
+    if (req == NULL) return;
+
+    // FTL returns the data size or negative error
+    int len = FTL_Read_By_Type(req->log_type, spi_tx_buffer + sizeof(master_header_t), MAX_LOG_SIZE);
+
+    if (len > 0)
+    {
+        master_header_t *hdr = (master_header_t *)spi_tx_buffer;
+        hdr->sof = 0xA5;
+        hdr->seq = 0; // Or whatever sequence logic is required
+        hdr->payload_len = len;
+        
+        // Compute Header CRC
+        hdr->header_crc = Hardware_CRC32((uint8_t*)hdr, sizeof(master_header_t) - 4);
+
+        // Compute Payload CRC
+        uint32_t payload_crc = Hardware_CRC32(spi_tx_buffer + sizeof(master_header_t), len);
+        
+        // Append Payload CRC at the end
+        uint32_t total_len = sizeof(master_header_t) + len;
+        memcpy(&spi_tx_buffer[total_len], &payload_crc, sizeof(uint32_t));
+        total_len += sizeof(uint32_t);
+
+        // Transmit via DMA back to host
+        HAL_SPI_Transmit_DMA(&hspi1, spi_tx_buffer, total_len);
     }
 }
 

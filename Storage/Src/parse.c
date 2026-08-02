@@ -151,8 +151,11 @@ void Frame_ParseByte(uint8_t byte)
 
                     }else if (parser.frame.header.cmd == 0x03U)
                     {
-                    	Storage_Parse_Read_Request(&parser.frame);
-
+                        if (Storage_Parse_Read_Request(&parser.frame))
+                        {
+                            // Request parsed successfully, out_req is populated.
+                            Storage_Process_Read(out_req);
+                        }
                     }
                 }
                 parser.state = FRAME_WAIT_SOF;
