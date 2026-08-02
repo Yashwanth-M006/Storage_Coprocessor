@@ -6,6 +6,7 @@
  */
 
 #include "storage_main.h"
+#include <stdlib.h>
 
 encryption_t encryption;
 compression_t compression;
@@ -20,8 +21,7 @@ void Storage_System_Init(config_payload_t *cfg)
 
     compression = (enc_comp_mode & 0x02) ? COMPRESSION_ENABLE : COMPRESSION_DISABLE;
 
-    int  Flash_Init(void);
-
+    Flash_Init();
 
     if (FTL_Init() != 0)
 	{
@@ -42,6 +42,25 @@ void Storage_Process_Command()
 
 	SPI1_ProcessBytes();
 
+    for (int type = 0; type < QUEUE_TYPES; type++) {
+        for (int prio = 0; prio < PRIORITY_LEVELS; prio++) {
+            ram_queue_t *q = &log_queues[type][prio];
+            if (q->count > 0) {
+                log_record_t *rec = &q->records[q->tail];
+                Storage_Write(rec->log_type, rec->data, rec->length);
+                q->tail = (q->tail + 1) % MAX_RECORDS;
+                q->count--;
+            } else if (q->overflow_head != NULL) {
+                log_node_t *node = q->overflow_head;
+                Storage_Write(node->record.log_type, node->record.data, node->record.length);
+                q->overflow_head = node->next;
+                if (q->overflow_head == NULL) {
+                    q->overflow_tail = NULL;
+                }
+                free(node);
+            }
+        }
+    }
 }
 
 int Storage_Write(uint8_t log_type, uint8_t *data, uint16_t len)
@@ -63,7 +82,7 @@ int Storage_Write(uint8_t log_type, uint8_t *data, uint16_t len)
     /* ---------------------------------
      Compression (if enabled)
     ----------------------------------*/
-    if (encryption)
+    if (compression)
     {
         uint16_t compressed_len = compress_block(process_buffer, len, process_buffer);
 
@@ -91,12 +110,11 @@ int Storage_Write(uint8_t log_type, uint8_t *data, uint16_t len)
 
         AES_CTR_encrypt(process_buffer, process_len, nonce, encrypted_buffer);
 
-        memcpy(process_buffer, encrypted_buffer, process_len);
-
-        /* NOTE:
-           You must store nonce along with record header
-           in FTL layer
-        */
+        // Prepend nonce to the process_buffer to store it alongside the ciphertext
+        memcpy(process_buffer, nonce, NONCE_SIZE);
+        memcpy(process_buffer + NONCE_SIZE, encrypted_buffer, process_len);
+        
+        process_len += NONCE_SIZE;
     }
 
     /* ---------------------------------

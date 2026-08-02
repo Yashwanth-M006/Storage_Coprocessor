@@ -6,6 +6,7 @@
  */
 
 #include "parse.h"
+#include <stdlib.h>
 uint8_t type;
 
 frame_parser_t parser;
@@ -107,9 +108,6 @@ void Frame_ParseByte(uint8_t byte)
                     if(parser.frame.header.cmd == 0x02U)
                     {
                     	Queue_Push(&parser.frame);
-
-                    	Storage_Write(type, parser.frame.payload, parser.frame.header.payload_len);
-
                     }else if(parser.frame.header.cmd == 0x01U)
                     {
                     	Queue_Load_Config(&parser.frame);
@@ -160,7 +158,27 @@ uint8_t Queue_Push(master_frame_t *frame)
         return 0;
 
     if (q->count >= MAX_RECORDS)
-        return 0;
+    {
+        log_node_t *node = (log_node_t *)malloc(sizeof(log_node_t));
+        if (node == NULL) return 0;
+        
+        node->record.log_type  = log_hdr.log_type;
+        node->record.priority  = priority;
+        node->record.subtype   = log_hdr.subtype;
+        node->record.timestamp = log_hdr.timestamp;
+        node->record.length = data_len;
+        memcpy(node->record.data, frame->payload + sizeof(write_log_header_t), data_len);
+        node->next = NULL;
+        
+        if (q->overflow_tail == NULL) {
+            q->overflow_head = node;
+            q->overflow_tail = node;
+        } else {
+            q->overflow_tail->next = node;
+            q->overflow_tail = node;
+        }
+        return 1;
+    }
 
     log_record_t *rec = &q->records[q->head];
 

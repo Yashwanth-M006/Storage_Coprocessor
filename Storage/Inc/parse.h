@@ -9,7 +9,7 @@
 #define INC_PARSE_H_
 
 #include "Config.h"
-#include <String.h>
+#include <string.h>
 
 
 extern frame_parser_t parser;

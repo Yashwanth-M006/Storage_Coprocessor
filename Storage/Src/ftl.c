@@ -17,7 +17,7 @@
 
 ftl_partition_t partitions[PARTITION_MAX];
 //ftl_superblock_t superblock;
-ftl_superblock_handle_t *psuperblock_handle;
+ftl_superblock_handle_t superblock_handle;
 //ftl_mode_t ftl_mode;
 
 /************************************************ Internal helpers **********************************************/
@@ -56,7 +56,7 @@ static void erase_oldest_sector(ftl_partition_t *p)
 void extract_partition_modes()
 {
     /* Check global circular override (bit 4) */
-    if (psuperblock_handle->storage_mode & (1 << 4))
+    if (superblock_handle.storage_mode & (1 << 4))
     {
         for (partition_id_t p = PARTITION_BURST; p < PARTITION_MAX; p++)
         {
@@ -68,7 +68,7 @@ void extract_partition_modes()
     /* Otherwise set per-partition mode */
     for (partition_id_t p = PARTITION_BURST;  p < PARTITION_MAX; p++)
     {
-        if (psuperblock_handle->storage_mode & (1 << p))
+        if (superblock_handle.storage_mode & (1 << p))
             partitions[p].ftl_mode = FTL_MODE_CIRCULAR;
         else
             partitions[p].ftl_mode = FTL_MODE_STOP;
@@ -83,14 +83,14 @@ static void build_partitions()
     // extract_partition_percent
     for (partition_id_t p = PARTITION_BURST; p < PARTITION_MAX; p++)
     {
-        psuperblock_handle->ftl_super->partition_percent[p] = (psuperblock_handle->partition_map >> (p * 3)) & 0x07;
+        superblock_handle.ftl_super.partition_percent[p] = (superblock_handle.partition_map >> (p * 3)) & 0x07;
     }
 
     extract_partition_modes();
 
     for (int i = 0; i < PARTITION_MAX; i++)
     {
-        uint32_t percent = psuperblock_handle->ftl_super->partition_percent[i] * 10;
+        uint32_t percent = superblock_handle.ftl_super.partition_percent[i] * 10;
         uint32_t size = (total_log_size * percent) / 100;
 
         size = (size / FLASH_SECTOR_SIZE) * FLASH_SECTOR_SIZE;
@@ -112,9 +112,9 @@ static void build_partitions()
 
 int FTL_Init(void)
 {
-    Flash_Read(0, (uint8_t*)psuperblock_handle, sizeof(ftl_superblock_handle_t));
+    Flash_Read(0, (uint8_t*)&superblock_handle, sizeof(ftl_superblock_handle_t));
 
-    if (psuperblock_handle->ftl_super->magic != FTL_MAGIC)
+    if (superblock_handle.ftl_super.magic != FTL_MAGIC)
         return -1;
 
     build_partitions();
@@ -122,8 +122,8 @@ int FTL_Init(void)
     /* Restore pointers */
     for (partition_id_t p = PARTITION_BURST; p < PARTITION_MAX; p++)
     {
-        partitions[p].write_ptr  = psuperblock_handle->ftl_super->write_ptrs[p];
-        partitions[p].oldest_ptr = psuperblock_handle->ftl_super->oldest_ptrs[p];
+        partitions[p].write_ptr  = superblock_handle.ftl_super.write_ptrs[p];
+        partitions[p].oldest_ptr = superblock_handle.ftl_super.oldest_ptrs[p];
     }
 
     return 0;
@@ -131,12 +131,12 @@ int FTL_Init(void)
 
 int FTL_Config(config_payload_t *config)
 {
-    memset(psuperblock_handle->ftl_super, 0, sizeof(psuperblock_handle));
+    memset(&superblock_handle.ftl_super, 0, sizeof(ftl_superblock_t));
 
-    psuperblock_handle->ftl_super->magic = FTL_MAGIC;
-    psuperblock_handle->partition_map = config->partition_map;
-    psuperblock_handle->storage_mode  = config->storage_mode;
-    //superblock.storage_limit = config->storage_limit;
+    superblock_handle.ftl_super.magic = FTL_MAGIC;
+    superblock_handle.partition_map = config->partition_map;
+    superblock_handle.storage_mode  = config->storage_mode;
+    //superblock_handle.storage_limit = config->storage_limit;
 
     build_partitions();   // Build from NEW config
 
@@ -144,12 +144,12 @@ int FTL_Config(config_payload_t *config)
     /* Initialize pointers to zero */
     for (partition_id_t p = PARTITION_BURST; p < PARTITION_MAX; p++)
     {
-        psuperblock_handle->ftl_super->write_ptrs[p]  = 0;
-        psuperblock_handle->ftl_super->oldest_ptrs[p] = 0;
+        superblock_handle.ftl_super.write_ptrs[p]  = partitions[p].start_addr;
+        superblock_handle.ftl_super.oldest_ptrs[p] = partitions[p].start_addr;
     }
 
     Flash_Erase_Sector(0);
-    Flash_Write(0, (uint8_t*)psuperblock_handle, sizeof(ftl_superblock_handle_t));
+    Flash_Write(0, (uint8_t*)&superblock_handle, sizeof(ftl_superblock_handle_t));
 
     return 0;
 }
@@ -161,16 +161,9 @@ int FTL_Append(uint8_t log_type, uint8_t *data, uint16_t len)
     if (log_type >= LOG_TYPE_MAX)
         return -1;
 
-    //uint8_t partition_id = psuperblock_handle->ftl_super->log_to_partition[log_type];
-
-    if (log_type >= PARTITION_MAX)
-        return -1;
-
     ftl_partition_t *p = &partitions[log_type];
 
     uint32_t record_size = sizeof(ftl_record_header_t) + len;
-
-    ftl_record_header_t header;
 
     if (!space_available(p, record_size))
     {
@@ -180,8 +173,24 @@ int FTL_Append(uint8_t log_type, uint8_t *data, uint16_t len)
         erase_oldest_sector(p);
     }
 
+    /* Wrap Boundary Check */
+    if (p->write_ptr + record_size > p->end_addr)
+    {
+        /* Write 0xFF padding if there is space */
+        uint32_t remaining = p->end_addr - p->write_ptr;
+        if (remaining > 0)
+        {
+            uint8_t padding = 0xFF;
+            for (uint32_t i = 0; i < remaining; i++)
+            {
+                Flash_Write(p->write_ptr + i, &padding, 1);
+            }
+        }
+        /* Wrap back to start */
+        p->write_ptr = p->start_addr;
+    }
 
-    //ftl_record_header_t header;
+    ftl_record_header_t header;
     header.log_type = log_type;
     header.length = len;
     header.crc = 0;  // Add real CRC if needed
@@ -191,16 +200,11 @@ int FTL_Append(uint8_t log_type, uint8_t *data, uint16_t len)
 
     p->write_ptr += record_size;
 
-    if (p->ftl_mode == FTL_MODE_CIRCULAR)
-    {
-        if (p->write_ptr >= p->end_addr)
-            p->write_ptr = p->start_addr;
-    }
-    psuperblock_handle->ftl_super->write_ptrs[log_type]  = p->write_ptr;
-    psuperblock_handle->ftl_super->oldest_ptrs[log_type] = p->oldest_ptr;
+    superblock_handle.ftl_super.write_ptrs[log_type]  = p->write_ptr;
+    superblock_handle.ftl_super.oldest_ptrs[log_type] = p->oldest_ptr;
 
     // update super block handle
-    Flash_Write(0, (uint8_t*)psuperblock_handle, sizeof(ftl_superblock_handle_t));
+    Flash_Write(0, (uint8_t*)&superblock_handle, sizeof(ftl_superblock_handle_t));
 
     return 0;
 }
@@ -210,7 +214,6 @@ int FTL_Read_By_Type(uint8_t log_type, uint8_t *buffer, uint16_t buffer_size)
     if (log_type >= LOG_TYPE_MAX)
         return -1;
 
-    //uint8_t partition_id = psuperblock_handle->ftl_super->log_to_partition[log_type];
     ftl_partition_t *p = &partitions[log_type];
 
     uint32_t addr = p->oldest_ptr;
@@ -220,7 +223,13 @@ int FTL_Read_By_Type(uint8_t log_type, uint8_t *buffer, uint16_t buffer_size)
         ftl_record_header_t header;
 
         Flash_Read(addr, (uint8_t*)&header, sizeof(header));
-
+        
+        if (header.log_type == 0xFF)
+        {
+            // Pad record, jump to start
+            addr = p->start_addr;
+            continue;
+        }
 
         if (header.log_type == log_type)
         {

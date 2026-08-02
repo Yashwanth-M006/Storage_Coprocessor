@@ -63,7 +63,7 @@ typedef struct __attribute__((packed))
 
 // just a handle structure
 typedef struct{
-	ftl_superblock_t *ftl_super;
+	ftl_superblock_t ftl_super;
 	uint8_t  storage_mode;        // bitmask
     uint16_t partition_map;       // 4 bits per partition
     //uint32_t storage_limit_bytes; // total usable bytes

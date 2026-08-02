@@ -152,12 +152,19 @@ typedef struct
 
 } log_record_t;
 
+typedef struct log_node_t {
+    log_record_t record;
+    struct log_node_t *next;
+} log_node_t;
+
 typedef struct
 {
     log_record_t records[MAX_RECORDS];
     uint16_t head;
     uint16_t tail;
     uint16_t count;
+    log_node_t *overflow_head;
+    log_node_t *overflow_tail;
 
 } ram_queue_t;
 
@@ -218,14 +225,5 @@ typedef enum
 
 }compression_t;
 
-
-/********************************************** Includes *********************************************************/
-
-#include "parse.h"
-#include "compression.h"
-#include "encryption.h"
-#include "ftl.h"
-#include "spi_flash.h"
-#include "storage_main.h"
 
 #endif /* INC_CONFIG_H_ */
