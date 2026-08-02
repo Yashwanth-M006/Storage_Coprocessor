@@ -56,6 +56,7 @@ typedef struct __attribute__((packed))
 {
     uint32_t magic;
     uint32_t version;
+    uint8_t  erase_policy;                       // 0: Lazy erase, 1: Pre-erase
     uint8_t  partition_percent[PARTITION_MAX];   // How much flash memory each partition gets
     uint8_t  log_to_partition[LOG_TYPE_MAX];	 // Which partition each log type should go into.
     uint8_t  partiton_mode[PARTITION_MAX];		// The storage mode of each partition.

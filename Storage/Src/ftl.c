@@ -188,9 +188,9 @@ int FTL_Config(config_payload_t *config)
     memset(&superblock_handle.ftl_super, 0, sizeof(ftl_superblock_t));
 
     superblock_handle.ftl_super.magic = FTL_MAGIC;
+    superblock_handle.ftl_super.erase_policy = config->erase_policy;
     superblock_handle.partition_map = config->partition_map;
     superblock_handle.storage_mode  = config->storage_mode;
-    //superblock_handle.storage_limit = config->storage_limit;
 
     build_partitions();   // Build from NEW config
 
@@ -200,6 +200,21 @@ int FTL_Config(config_payload_t *config)
     {
         superblock_handle.ftl_super.write_ptrs[p]  = partitions[p].start_addr;
         superblock_handle.ftl_super.oldest_ptrs[p] = partitions[p].start_addr;
+    }
+
+    /* Pre-Erase implementation */
+    if (config->erase_policy == 1)
+    {
+        uint32_t end_limit = FLASH_LOG_START;
+        for (int i = 0; i < PARTITION_MAX; i++) 
+        {
+            if (partitions[i].end_addr > end_limit)
+                end_limit = partitions[i].end_addr;
+        }
+        for (uint32_t addr = FLASH_LOG_START; addr < end_limit; addr += FLASH_SECTOR_SIZE)
+        {
+            Flash_Erase_Sector(addr);
+        }
     }
 
     superblock_handle.ftl_super.version = 0;
@@ -243,6 +258,25 @@ int FTL_Append(uint8_t log_type, uint8_t *data, uint16_t len)
         }
         /* Wrap back to start */
         p->write_ptr = p->start_addr;
+    }
+
+    /* Lazy Erase Logic */
+    if (superblock_handle.ftl_super.erase_policy == 0)
+    {
+        uint32_t current_sector = align_sector(p->write_ptr);
+        uint32_t next_sector = align_sector(p->write_ptr + record_size - 1);
+        
+        // If we are at the exact beginning of a sector, it needs to be erased
+        if (p->write_ptr == current_sector)
+        {
+            Flash_Erase_Sector(current_sector);
+        }
+        
+        // If the record crosses into the next sector, erase it too
+        if (next_sector > current_sector)
+        {
+            Flash_Erase_Sector(next_sector);
+        }
     }
 
     ftl_record_header_t header;
