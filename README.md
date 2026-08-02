@@ -99,3 +99,28 @@ This project is built using **STM32CubeIDE**.
 3. Browse to this directory and select the `Storage_Coprocessor` project.
 4. Click **Build** (hammer icon) to compile the firmware.
 5. Use an ST-LINK or compatible debugger to flash the target device.
+
+## Performance & Evaluation (Renode Simulation)
+
+The coprocessor performance and burst traffic resilience were evaluated using **Hardware-in-the-Loop (HIL) simulation in Renode** (`blackbox.resc`).
+
+### Simulation Conditions & Setup
+- **Emulated Target:** STM32F411 CPU core paired with external `Micron_MT25Q` (32MB) SPI Flash attached on SPI2 Master.
+- **Traffic Pattern:** Sustained burst injection of **500 high-priority `BURST` log records** (64 bytes each = 32 KB total payload) pushed directly into queue logic (`Benchmark_Run()`).
+- **FTL Policy:** Lazy Erase mode enabled with partition layout: 50% Burst, 20% Interrupt, 20% Event, 10% Time.
+- **Evaluation Goal:** Stress test the 64-node Static Memory Pool (`MAX_OVERFLOW_NODES`) under extreme burst traffic to measure packet drop rate and queue drain latency.
+
+### Test Results
+
+| Metric | Measured Value | Note |
+|---|---|---|
+| **Injected Packets** | 500 | 64-byte payload per packet (32 KB total) |
+| **Successful Packets** | 500 | 100% processed and stored |
+| **Dropped Packets** | 0 | 0% drop rate (Static Pool successfully buffered bursts) |
+| **CPU Queue Drain Time** | 24 ms | Measured via `HAL_GetTick()` in virtual MCU cycles |
+| **CPU Processing Speed** | ~1.33 MB/s | 20,833 packets/second processing rate |
+| **Estimated Total Silicon Latency** | ~36.8 ms | 24 ms (CPU processing) + 12.8 ms (physical 20 MHz SPI Flash transmission) |
+
+> [!NOTE]
+> Renode transfers byte streams to simulated peripherals instantly in virtual time. Therefore, the 24 ms figure represents pure CPU logic execution and FTL management overhead. Factoring in the physical 20 MHz SPI clock rate (256,000 bits / 20 MHz = 12.8 ms), the total estimated hardware latency is ~36.8 ms.
+

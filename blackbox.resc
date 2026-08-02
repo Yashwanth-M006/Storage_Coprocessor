@@ -1,0 +1,30 @@
+:name: Storage_BlackBox_Benchmark
+:description: Simulates the STM32F411 Coprocessor and SPI Flash for robust benchmarking.
+
+using sysbus
+
+# Create STM32F411 Machine
+mach create "Storage_Coprocessor"
+machine LoadPlatformDescription @platforms/cpus/stm32f4.repl
+
+# Attach W25Q256-compatible SPI Flash to SPI2
+machine LoadPlatformDescription @add_flash.repl
+
+# Load the compiled firmware
+sysbus LoadELF $ORIGIN/Debug/Storage_Coprocessor.elf
+
+# Create a macro to run the simulation and print results
+macro run_benchmark
+"""
+    # Start execution
+    start
+    
+    # Wait for the benchmark to finish (we can monitor UART or just wait a virtual time)
+    # The benchmark takes a few seconds to run in virtual time due to Flash erase/write delays
+    sleep 5
+    
+    # We can inspect the memory pool state here if needed
+    # sysbus ReadDoubleWord 0x... (address of overflow_pool)
+"""
+
+echo "Simulation loaded. To run, execute: start"

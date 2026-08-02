@@ -22,7 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "storage_main.h"
-#include "parse.h"
+#include "benchmark.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -100,6 +100,10 @@ int main(void)
   MX_SPI1_Init();
   MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
+  
+  // Initialize the FTL and queues (optional, handled by config but safe to init)
+  // Run the benchmark test
+  Benchmark_Run();
 
   /* USER CODE END 2 */
 

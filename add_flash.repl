@@ -1,0 +1,5 @@
+flash_mem: Memory.MappedMemory
+    size: 0x2000000
+
+external_flash: SPI.Micron_MT25Q @ spi2
+    underlyingMemory: flash_mem

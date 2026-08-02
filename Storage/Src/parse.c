@@ -47,6 +47,8 @@ void Free_Overflow_Node(log_node_t *node)
 
 frame_parser_t parser;
 
+extern SPI_HandleTypeDef hspi1;
+
 uint8_t spi_rx_buffer[SPI_RX_BUF_SIZE];
 
 volatile uint16_t spi_rx_old_pos = 0;
