@@ -28,7 +28,11 @@ The FTL acts as a lightweight file system specifically optimized for SPI Flash l
 - **Superblock Architecture:** Sector 0 of the flash is dedicated to the Superblock. It persistently stores the partition configuration, storage modes, and current Read/Write/Oldest pointers.
 
 ### 4. Data Security & Efficiency
-- **Encryption (AES-CTR):** Payloads can be optionally encrypted using AES in Counter (CTR) mode. CTR mode is chosen to avoid data padding (saving space) and utilizes a dynamically generated Nonce based on the frame sequence number.
+- **Encryption (AES-CTR):** Payloads can be optionally encrypted using AES in Counter (CTR) mode. CTR mode is chosen to avoid data padding (saving space) and utilizes a dynamically generated Nonce.
+  - **Master Key Storage:** The 128-bit (16-byte) AES key is loaded into RAM in the global context variable `g_enc_ctx.master_key` when `ENC_SetKey()` is invoked. The system designates a dedicated Flash location at `KEY_FLASH_ADDR` (`0x0807F000U` - Sector 7 of the STM32F411 internal flash) for persistent key storage.
+  - **Nonce Generation:** The 12-byte cryptographic nonce is constructed dynamically to guarantee uniqueness:
+    - **Bytes 0–7:** Derived from the 64-bit transaction sequence number (`parser.frame.header.seq`) to ensure sequence uniqueness.
+    - **Bytes 8–11:** Computed as a 32-bit XOR hash of the STM32F4 microcontroller's unique 96-bit hardware UID registers (located at `0x1FFF7A10U`) to ensure device uniqueness.
 - **Compression:** An optional compression layer (Delta + Run-Length Encoding) can be enabled to squeeze maximum data into the SPI Flash.
 - *Both are toggled via the Configuration Command (`enc_comp_mode`).*
 
