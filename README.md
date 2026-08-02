@@ -8,7 +8,7 @@ Firmware for an STM32-based (STM32F411) Storage Coprocessor designed to act as a
 ### 1. Robust Frame Protocol & SPI DMA
 Data is received continuously via SPI using DMA (Circular mode into a 1KB RAM buffer). The system implements a resilient state-machine packet parser:
 - **SOF Synchronization:** Start of Frame (`0xA5`).
-- **Dual CRC16-CCITT:** Header and payload are independently verified to ensure no corrupted lengths or data are processed.
+- **Hardware-Accelerated CRC32:** Both the header and payload are validated independently using the STM32's built-in Hardware CRC peripheral. If either checksum fails, the frame is rejected to prevent processing corrupted length/data packets.
 
 ### 2. Log Categorization & Priority Queuing
 Incoming data is categorized dynamically. The coprocessor manages 4 dedicated log types, each mapped to its own FTL partition and RAM queue:
@@ -27,7 +27,11 @@ The FTL acts as a lightweight file system specifically optimized for SPI Flash l
   - **`FTL_MODE_STOP`:** Halts logging for a specific partition when it becomes completely full.
   - **`FTL_MODE_CIRCULAR`:** Operates as a ring buffer. When the partition fills up, it actively erases the oldest 4KB sector and overwrites it with new data.
 - **Partition Boundary Wrapping:** To prevent a log record (header + payload) from being split across the physical boundaries of a partition, the FTL calculates remaining space before writing. If the record exceeds the space, the FTL pads the remainder of the partition with `0xFF`, resets the write pointer (`write_ptr`) back to the partition's `start_addr`, and writes the record sequentially.
-- **Superblock Architecture:** Sector 0 of the flash is dedicated to the Superblock. It persistently stores the partition configuration, storage modes, and current Read/Write/Oldest pointers.
+- **Fail-Safe Dual-Bank Superblock (A/B Toggle):** To prevent corruption of system metadata in the event of a power failure while updating pointers, the FTL uses a dual-bank configuration strategy. 
+  - Two dedicated sectors (**Sector 0** and **Sector 1**) are allocated for storing the superblock.
+  - Each superblock contains an incrementing `version` number and a `crc` checksum validated via the Hardware CRC peripheral.
+  - When saving configuration updates or pointer progress, the system writes to the inactive sector and verifies the checksum. Only after verification does it logically swap the active sector pointer.
+  - Upon boot, `FTL_Init()` reads both sectors, checks the CRC of both, and runs from the bank with the highest valid version number.
 
 ### 4. Data Security & Efficiency
 - **Encryption (AES-CTR):** Payloads can be optionally encrypted using AES in Counter (CTR) mode. CTR mode is chosen to avoid data padding (saving space) and utilizes a dynamically generated Nonce.
@@ -53,9 +57,9 @@ The FTL acts as a lightweight file system specifically optimized for SPI Flash l
 ## SPI Protocol Summary
 Data is sent from the host master to the coprocessor using the following packet format:
 1. **SOF** (`0xA5`)
-2. **Header** (Command ID, Payload Length, Sequence ID, Header CRC16)
+2. **Header** (Command ID, Payload Length, Sequence ID, Header CRC32)
 3. **Payload** (Depends on Command ID)
-4. **Payload CRC** (CRC16-CCITT)
+4. **Payload CRC** (Hardware-calculated CRC32)
 
 ### Supported Commands
 - **`0x01` (Load Configuration):** 
