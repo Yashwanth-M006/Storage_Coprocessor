@@ -62,11 +62,21 @@ Data is sent from the host master to the coprocessor using the following packet 
 4. **Payload CRC** (Hardware-calculated CRC32)
 
 ### Supported Commands
+### Supported Commands
 - **`0x01` (Load Configuration):** 
-  - Sets up the `partition_map` (sizes).
-  - Sets `storage_mode` (Circular vs Stop policies).
-  - Sets `enc_comp_mode` (Encryption/Compression toggles).
-  - Sets `max_log_size` constraints.
+  - Loads a `config_payload_t` struct to configure partition sizes, FTL storage policies, and hardware options.
+  
+  #### Configuration Payload Specification (`config_payload_t`):
+  
+  | Offset | Field Name | Type | Description |
+  |--------|------------|------|-------------|
+  | 0x00 | `enc_comp_mode` | `uint8_t` | **Encryption & Compression Mode Control:**<br>• **Bit 0:** Encryption Enable (1 = AES-CTR enabled, 0 = disabled)<br>• **Bit 1:** Compression Enable (1 = Delta+RLE compression enabled, 0 = disabled)<br>• **Bits 2-7:** Reserved (must be 0) |
+  | 0x01 | `storage_mode` | `uint8_t` | **Storage FTL Policies (Circular vs. Stop):**<br>• **Bit 0:** `BURST` partition Circular flag (1 = Circular, 0 = Stop)<br>• **Bit 1:** `INTERRUPT` partition Circular flag (1 = Circular, 0 = Stop)<br>• **Bit 2:** `EVENT` partition Circular flag (1 = Circular, 0 = Stop)<br>• **Bit 3:** `TIME` partition Circular flag (1 = Circular, 0 = Stop)<br>• **Bit 4:** Global Circular Override (1 = Force all partitions to Circular, overrides bits 0-3)<br>• **Bits 5-7:** Reserved (must be 0) |
+  | 0x02 | `erase_policy` | `uint8_t` | **Erase Policy Control:**<br>• 0 = Lazy Erase (erase sector dynamically on write)<br>• 1 = Pre-Erase (prepare sectors in advance) |
+  | 0x03 | `reserved1` | `uint8_t` | Reserved padding (must be 0) |
+  | 0x04 | `partition_map` | `uint16_t` | **Partition Size Allocations:**<br>This field maps 3-bit values for each partition, where each unit equals 10% of the available flash log memory. **The sum of these units must equal exactly 10 (100%).**<br>• **Bits 0–2:** `BURST` partition percentage unit (0-7)<br>• **Bits 3–5:** `INTERRUPT` partition percentage unit (0-7)<br>• **Bits 6–8:** `EVENT` partition percentage unit (0-7)<br>• **Bits 9–11:** `TIME` partition percentage unit (0-7)<br>• **Bits 12–15:** Reserved (must be 0) |
+  | 0x06 | `max_log_size` | `uint16_t` | **Maximum Log Size Constraint:**<br>Specifies the maximum allowable byte size for a single log record. Must be greater than 0 and less than or equal to `MAX_LOG_SIZE` (256 bytes). |
+
 - **`0x02` (Write Request):** 
   - Submits a `write_log_header_t` containing Log Type, Priority, Subtype, Timestamp, and the actual log data.
 - **`0x03` (Read Request):** 
