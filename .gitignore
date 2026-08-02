@@ -21,3 +21,7 @@ Thumbs.db
 # We will keep .project, .cproject, .mxproject, and .ioc as they are needed for import
 # But we can ignore .settings if we want, or keep it. It's often safer to ignore user-specific settings.
 .settings/
+
+# Ignore interview documentation
+Interview_Questions.txt
+
