@@ -17,7 +17,8 @@ Incoming data is categorized dynamically. The coprocessor manages 4 dedicated lo
 - **`LOG_TYPE_EVENT` (2):** System state changes or standard events.
 - **`LOG_TYPE_TIME` (3):** Periodic heartbeat or RTC syncs.
 
-Each log type supports **8 Priority Levels (0–7)**, allowing the queuing system to intelligently manage RAM buffering when incoming data exceeds the SPI Flash write speed.
+Each log type supports **8 Priority Levels (0–7)**.
+- **Dynamic Queue Allocation (Overflow Handling):** If a priority queue's static capacity (`MAX_RECORDS`) is exceeded, the coprocessor automatically allocates memory dynamically using `malloc` to create temporary queue nodes (`log_node_t`). These are safely processed and deallocated in a FIFO manner once the flash writer catches up, preventing data loss.
 
 ### 3. Custom Flash Translation Layer (FTL)
 The FTL acts as a lightweight file system specifically optimized for SPI Flash logging.
@@ -25,6 +26,7 @@ The FTL acts as a lightweight file system specifically optimized for SPI Flash l
 - **Storage Policies (Modes):**
   - **`FTL_MODE_STOP`:** Halts logging for a specific partition when it becomes completely full.
   - **`FTL_MODE_CIRCULAR`:** Operates as a ring buffer. When the partition fills up, it actively erases the oldest 4KB sector and overwrites it with new data.
+- **Partition Boundary Wrapping:** To prevent a log record (header + payload) from being split across the physical boundaries of a partition, the FTL calculates remaining space before writing. If the record exceeds the space, the FTL pads the remainder of the partition with `0xFF`, resets the write pointer (`write_ptr`) back to the partition's `start_addr`, and writes the record sequentially.
 - **Superblock Architecture:** Sector 0 of the flash is dedicated to the Superblock. It persistently stores the partition configuration, storage modes, and current Read/Write/Oldest pointers.
 
 ### 4. Data Security & Efficiency
