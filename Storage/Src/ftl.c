@@ -6,6 +6,8 @@
  */
 
 #include "ftl.h"
+#include "parse.h"
+#include "spi_flash.h"
 
 
 /* Flash driver prototypes (implement separately) */
@@ -16,9 +18,28 @@
 /*********************************************** States ***************************************************/
 
 ftl_partition_t partitions[PARTITION_MAX];
-//ftl_superblock_t superblock;
 ftl_superblock_handle_t superblock_handle;
-//ftl_mode_t ftl_mode;
+uint32_t active_sb_sector = SUPERBLOCK_SECTOR_0_ADDR;
+
+uint32_t Calculate_Superblock_CRC32(ftl_superblock_handle_t *handle)
+{
+    uint16_t data_len = sizeof(ftl_superblock_t) - sizeof(uint32_t);
+    return Hardware_CRC32((uint8_t*)&handle->ftl_super, data_len);
+}
+
+void FTL_Sync_Superblock(void)
+{
+    superblock_handle.ftl_super.version++;
+    superblock_handle.ftl_super.crc = Calculate_Superblock_CRC32(&superblock_handle);
+
+    uint32_t inactive_sector = (active_sb_sector == SUPERBLOCK_SECTOR_0_ADDR) ? 
+                                SUPERBLOCK_SECTOR_1_ADDR : SUPERBLOCK_SECTOR_0_ADDR;
+
+    Flash_Erase_Sector(inactive_sector);
+    Flash_Write(inactive_sector, (uint8_t*)&superblock_handle, sizeof(ftl_superblock_handle_t));
+
+    active_sb_sector = inactive_sector;
+}
 
 /************************************************ Internal helpers **********************************************/
 static uint32_t align_sector(uint32_t addr)
@@ -109,13 +130,46 @@ static void build_partitions()
 /********************************************** Public API ******************************************************/
 
 //Load previously saved flash metadata and rebuild runtime state.
-
 int FTL_Init(void)
 {
-    Flash_Read(0, (uint8_t*)&superblock_handle, sizeof(ftl_superblock_handle_t));
+    ftl_superblock_handle_t sb_0, sb_1;
+    
+    Flash_Read(SUPERBLOCK_SECTOR_0_ADDR, (uint8_t*)&sb_0, sizeof(ftl_superblock_handle_t));
+    Flash_Read(SUPERBLOCK_SECTOR_1_ADDR, (uint8_t*)&sb_1, sizeof(ftl_superblock_handle_t));
 
-    if (superblock_handle.ftl_super.magic != FTL_MAGIC)
-        return -1;
+    uint8_t sb_0_valid = (sb_0.ftl_super.magic == FTL_MAGIC) && 
+                         (Calculate_Superblock_CRC32(&sb_0) == sb_0.ftl_super.crc);
+    
+    uint8_t sb_1_valid = (sb_1.ftl_super.magic == FTL_MAGIC) && 
+                         (Calculate_Superblock_CRC32(&sb_1) == sb_1.ftl_super.crc);
+
+    if (sb_0_valid && sb_1_valid)
+    {
+        if (sb_0.ftl_super.version >= sb_1.ftl_super.version)
+        {
+            active_sb_sector = SUPERBLOCK_SECTOR_0_ADDR;
+            superblock_handle = sb_0;
+        }
+        else
+        {
+            active_sb_sector = SUPERBLOCK_SECTOR_1_ADDR;
+            superblock_handle = sb_1;
+        }
+    }
+    else if (sb_0_valid)
+    {
+        active_sb_sector = SUPERBLOCK_SECTOR_0_ADDR;
+        superblock_handle = sb_0;
+    }
+    else if (sb_1_valid)
+    {
+        active_sb_sector = SUPERBLOCK_SECTOR_1_ADDR;
+        superblock_handle = sb_1;
+    }
+    else
+    {
+        return -1; // Both superblocks invalid
+    }
 
     build_partitions();
 
@@ -148,8 +202,9 @@ int FTL_Config(config_payload_t *config)
         superblock_handle.ftl_super.oldest_ptrs[p] = partitions[p].start_addr;
     }
 
-    Flash_Erase_Sector(0);
-    Flash_Write(0, (uint8_t*)&superblock_handle, sizeof(ftl_superblock_handle_t));
+    superblock_handle.ftl_super.version = 0;
+
+    FTL_Sync_Superblock();
 
     return 0;
 }
@@ -204,7 +259,7 @@ int FTL_Append(uint8_t log_type, uint8_t *data, uint16_t len)
     superblock_handle.ftl_super.oldest_ptrs[log_type] = p->oldest_ptr;
 
     // update super block handle
-    Flash_Write(0, (uint8_t*)&superblock_handle, sizeof(ftl_superblock_handle_t));
+    FTL_Sync_Superblock();
 
     return 0;
 }

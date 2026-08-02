@@ -7,6 +7,8 @@
 
 #include "parse.h"
 #include <stdlib.h>
+#include "storage_main.h"
+
 uint8_t type;
 
 frame_parser_t parser;
@@ -100,7 +102,7 @@ void Frame_ParseByte(uint8_t byte)
 
             parser.frame.payload_crc = (parser.frame.payload_crc << 8) | byte;
 
-            if (++parser.crc_index == 2)
+            if (++parser.crc_index == 4)
             {
                 if (Payload_CRC_OK(&parser.frame))
                 {
@@ -272,30 +274,33 @@ uint8_t Storage_Parse_Read_Request(master_frame_t *frame)
 }
 
 /*******************************   CRC   *************************************************************/
-uint16_t CRC16_CCITT(const uint8_t *data, uint16_t length)
+uint32_t Hardware_CRC32(const uint8_t *data, uint16_t length)
 {
-    uint16_t crc = 0xFFFF;
+    // Reset CRC calculation
+    CRC->CR = CRC_CR_RESET;
 
-    for (uint16_t i = 0; i < length; i++)
+    uint32_t *p32 = (uint32_t*)data;
+    for (int i = 0; i < length / 4; i++)
     {
-        crc ^= (uint16_t)data[i] << 8;
-
-        for (uint8_t j = 0; j < 8; j++)
-        {
-            if (crc & 0x8000)
-                crc = (crc << 1) ^ 0x1021;
-            else
-                crc <<= 1;
-        }
+        CRC->DR = p32[i];
     }
-
-    return crc;
+    
+    // Handle remaining bytes by padding with 0s
+    uint8_t rem = length % 4;
+    if (rem > 0)
+    {
+        uint32_t temp = 0;
+        memcpy(&temp, data + (length / 4) * 4, rem);
+        CRC->DR = temp;
+    }
+    
+    return CRC->DR;
 }
 
 uint8_t Payload_CRC_OK(master_frame_t *frame)
 {
-    uint16_t calculated_crc =
-        CRC16_CCITT(frame->payload,
+    uint32_t calculated_crc =
+        Hardware_CRC32(frame->payload,
                     frame->header.payload_len);
 
     if (calculated_crc == frame->payload_crc)
@@ -306,10 +311,10 @@ uint8_t Payload_CRC_OK(master_frame_t *frame)
 
 uint8_t Header_CRC_OK(master_header_t *header)
 {
-    // Calculate CRC over first 6 bytes (excluding header_crc)
-    uint16_t calculated_crc =
-        CRC16_CCITT((uint8_t*)header,
-                    sizeof(master_header_t) - sizeof(uint16_t));
+    // Calculate CRC over first 12 bytes (excluding header_crc)
+    uint32_t calculated_crc =
+        Hardware_CRC32((uint8_t*)header,
+                    sizeof(master_header_t) - sizeof(uint32_t));
 
     if (calculated_crc == header->header_crc)
         return 1;

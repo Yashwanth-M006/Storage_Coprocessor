@@ -39,7 +39,7 @@ uint8_t Queue_Load_Config(master_frame_t *frame);
 uint8_t Storage_Parse_Read_Request(master_frame_t *frame);
 
 /*************************************  Miscellaneous  ******************************************************/
-uint16_t CRC16_CCITT(const uint8_t *data, uint16_t length);
+uint32_t Hardware_CRC32(const uint8_t *data, uint16_t length);
 
 uint8_t Payload_CRC_OK(master_frame_t *frame);
 

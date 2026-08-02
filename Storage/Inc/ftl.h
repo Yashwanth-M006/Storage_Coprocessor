@@ -18,6 +18,9 @@
 #define FLASH_LOG_START       FLASH_META_SIZE
 #define FLASH_LOG_SIZE        (FLASH_TOTAL_SIZE - FLASH_META_SIZE)
 
+#define SUPERBLOCK_SECTOR_0_ADDR 0
+#define SUPERBLOCK_SECTOR_1_ADDR FLASH_SECTOR_SIZE
+
 #define FTL_MAGIC             0xA5A5F1F1
 #define FTL_RECORD_MAGIC      0xDEADBEEF
 
@@ -52,6 +55,7 @@ typedef struct __attribute__((packed))
 typedef struct __attribute__((packed))
 {
     uint32_t magic;
+    uint32_t version;
     uint8_t  partition_percent[PARTITION_MAX];   // How much flash memory each partition gets
     uint8_t  log_to_partition[LOG_TYPE_MAX];	 // Which partition each log type should go into.
     uint8_t  partiton_mode[PARTITION_MAX];		// The storage mode of each partition.

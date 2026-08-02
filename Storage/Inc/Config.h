@@ -49,7 +49,7 @@ typedef struct __attribute__((packed))
     //uint16_t flags;
     uint64_t seq;            // Sequence number
     uint16_t payload_len;    // Length of payload
-    uint16_t header_crc;     // CRC of above fields
+    uint32_t header_crc;     // CRC of above fields
 
 } master_header_t;
 
@@ -58,7 +58,7 @@ typedef struct
 {
     master_header_t header;
     uint8_t  payload[MAX_PAYLOAD_SIZE];
-    uint16_t payload_crc;
+    uint32_t payload_crc;
     uint8_t  frame_valid;
 
 } master_frame_t;

@@ -7,6 +7,11 @@
 
 #include "storage_main.h"
 #include <stdlib.h>
+#include "ftl.h"
+#include "spi_flash.h"
+#include "encryption.h"
+#include "compression.h"
+#include "parse.h"
 
 encryption_t encryption;
 compression_t compression;

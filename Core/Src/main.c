@@ -22,7 +22,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "storage_main.h"
+#include "parse.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
