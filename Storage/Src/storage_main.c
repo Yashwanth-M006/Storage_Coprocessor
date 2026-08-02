@@ -62,7 +62,7 @@ void Storage_Process_Command()
                 if (q->overflow_head == NULL) {
                     q->overflow_tail = NULL;
                 }
-                free(node);
+                Free_Overflow_Node(node);
             }
         }
     }

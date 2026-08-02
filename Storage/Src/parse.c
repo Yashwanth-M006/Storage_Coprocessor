@@ -12,6 +12,39 @@
 
 uint8_t type;
 
+/* Static Memory Pool for Overflow Nodes */
+static log_node_t overflow_pool[MAX_OVERFLOW_NODES];
+static log_node_t *overflow_free_list = NULL;
+static uint8_t pool_initialized = 0;
+
+void Init_Overflow_Pool(void)
+{
+    for (int i = 0; i < MAX_OVERFLOW_NODES - 1; i++)
+    {
+        overflow_pool[i].next = &overflow_pool[i + 1];
+    }
+    overflow_pool[MAX_OVERFLOW_NODES - 1].next = NULL;
+    overflow_free_list = &overflow_pool[0];
+    pool_initialized = 1;
+}
+
+log_node_t *Alloc_Overflow_Node(void)
+{
+    if (overflow_free_list == NULL)
+        return NULL;
+    
+    log_node_t *node = overflow_free_list;
+    overflow_free_list = overflow_free_list->next;
+    return node;
+}
+
+void Free_Overflow_Node(log_node_t *node)
+{
+    if (node == NULL) return;
+    node->next = overflow_free_list;
+    overflow_free_list = node;
+}
+
 frame_parser_t parser;
 
 uint8_t spi_rx_buffer[SPI_RX_BUF_SIZE];
@@ -162,8 +195,12 @@ uint8_t Queue_Push(master_frame_t *frame)
 
     if (q->count >= MAX_RECORDS)
     {
-        log_node_t *node = (log_node_t *)malloc(sizeof(log_node_t));
-        if (node == NULL) return 0;
+        if (!pool_initialized) {
+            Init_Overflow_Pool();
+        }
+
+        log_node_t *node = Alloc_Overflow_Node();
+        if (node == NULL) return 0; // Drop packet (Option A)
         
         node->record.log_type  = log_hdr.log_type;
         node->record.priority  = priority;

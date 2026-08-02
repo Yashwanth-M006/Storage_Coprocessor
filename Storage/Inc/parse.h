@@ -20,6 +20,10 @@ extern frame_parser_t parser;
 extern uint8_t spi_rx_buffer[SPI_RX_BUF_SIZE];
 extern volatile uint16_t spi_rx_old_pos;
 
+/******************************************  Static Memory Pool  *************************************************/
+#define MAX_OVERFLOW_NODES 64
+void Init_Overflow_Pool(void);
+void Free_Overflow_Node(log_node_t *node);
 
 /********************************************  APIs  **********************************************************/
 
