@@ -24,6 +24,13 @@ l2p_cache_entry_t l2p_cache[L2P_CACHE_ENTRIES];
 uint16_t l2p_cache_count = 0;
 uint8_t l2p_cache_dirty[L2P_CACHE_ENTRIES];
 
+// Atomic State
+uint32_t active_l2p_bank = L2P_TABLE_BANK_A;
+uint32_t l2p_sequence = 0;
+uint64_t active_last_used_sequence = 0;
+
+volatile uint8_t ftl_locked = 0;
+
 // Free block tracking
 uint8_t free_block_bitmap[1024]; // 8192 bits for 8192 sectors. 1 = free, 0 = used.
 
@@ -58,7 +65,7 @@ uint16_t FTL_Get_Physical_Block(uint16_t logical_block)
 
     // 2. Cache Miss: Read from Flash Persistent Table
     uint16_t physical_block = INVALID_BLOCK;
-    uint32_t flash_addr = L2P_TABLE_ADDR + (logical_block * sizeof(uint16_t));
+    uint32_t flash_addr = active_l2p_bank + (logical_block * sizeof(uint16_t));
     Flash_Read(flash_addr, (uint8_t*)&physical_block, sizeof(uint16_t));
 
     // 3. Add to Cache (evict if full - LRU eviction not fully implemented here)
@@ -88,6 +95,14 @@ static void Mark_Block_Used(uint16_t block)
 // Allocate the least-worn free block
 uint16_t FTL_Allocate_Free_Block(void)
 {
+    __disable_irq();
+    while (ftl_locked) {
+        __enable_irq();
+        __disable_irq();
+    }
+    ftl_locked = 1;
+    __enable_irq();
+
     uint16_t best_block = INVALID_BLOCK;
     uint32_t min_erase_count = 0xFFFFFFFF;
     
@@ -117,68 +132,68 @@ uint16_t FTL_Allocate_Free_Block(void)
         Mark_Block_Used(best_block);
     }
     
+    ftl_locked = 0;
     return best_block;
 }
 
-// Flush dirty cache entries to persistent table
+// Flush dirty cache entries to persistent table (Atomic A/B Double Buffering)
 void FTL_Flush_Cache(void)
 {
+    uint32_t inactive_bank = (active_l2p_bank == L2P_TABLE_BANK_A) ? L2P_TABLE_BANK_B : L2P_TABLE_BANK_A;
     uint8_t sector_buffer[FLASH_SECTOR_SIZE];
-    uint32_t current_sector = 0xFFFFFFFF;
-    int sector_dirty = 0;
-
-    for (int i = 0; i < l2p_cache_count; i++)
-    {
-        if (l2p_cache_dirty[i])
-        {
-            uint32_t logical_block = l2p_cache[i].logical_block;
-            uint32_t target_sector = (logical_block * sizeof(uint16_t)) / FLASH_SECTOR_SIZE;
-            
-            // If we moved to a new sector, flush the old one first
-            if (current_sector != 0xFFFFFFFF && current_sector != target_sector && sector_dirty)
-            {
-                // Calculate CRC (simulated at the end of the sector)
-                uint32_t crc = Hardware_CRC32(sector_buffer, FLASH_SECTOR_SIZE - 4);
-                memcpy(&sector_buffer[FLASH_SECTOR_SIZE - 4], &crc, 4);
-                
-                uint32_t flash_addr = L2P_TABLE_ADDR + (current_sector * FLASH_SECTOR_SIZE);
-                Flash_Erase_Sector(flash_addr);
-                Flash_Write(flash_addr, sector_buffer, FLASH_SECTOR_SIZE);
-                sector_dirty = 0;
-            }
-
-            // Load the target sector if not already loaded
-            if (current_sector != target_sector)
-            {
-                current_sector = target_sector;
-                uint32_t flash_addr = L2P_TABLE_ADDR + (current_sector * FLASH_SECTOR_SIZE);
-                Flash_Read(flash_addr, sector_buffer, FLASH_SECTOR_SIZE);
-            }
-            
-            // Update the mapping inside the RAM buffer
-            uint32_t offset_in_sector = (logical_block * sizeof(uint16_t)) % FLASH_SECTOR_SIZE;
-            memcpy(&sector_buffer[offset_in_sector], &l2p_cache[i].physical_block, sizeof(uint16_t));
-            
-            sector_dirty = 1;
-            l2p_cache_dirty[i] = 0;
-        }
+    
+    // Erase inactive bank (4 sectors = 16 KB)
+    for (int i = 0; i < 4; i++) {
+        Flash_Erase_Sector(inactive_bank + (i * FLASH_SECTOR_SIZE));
     }
     
-    // Flush the final sector if it is dirty
-    if (current_sector != 0xFFFFFFFF && sector_dirty)
-    {
-        uint32_t crc = Hardware_CRC32(sector_buffer, FLASH_SECTOR_SIZE - 4);
-        memcpy(&sector_buffer[FLASH_SECTOR_SIZE - 4], &crc, 4);
+    // Copy active bank to inactive bank, applying cache changes
+    for (int s = 0; s < 4; s++) {
+        Flash_Read(active_l2p_bank + (s * FLASH_SECTOR_SIZE), sector_buffer, FLASH_SECTOR_SIZE);
         
-        uint32_t flash_addr = L2P_TABLE_ADDR + (current_sector * FLASH_SECTOR_SIZE);
-        Flash_Erase_Sector(flash_addr);
-        Flash_Write(flash_addr, sector_buffer, FLASH_SECTOR_SIZE);
+        // Apply cache changes for this sector
+        for (int i = 0; i < l2p_cache_count; i++) {
+            if (l2p_cache_dirty[i]) {
+                uint32_t logical_block = l2p_cache[i].logical_block;
+                uint32_t target_sector = (logical_block * sizeof(uint16_t)) / FLASH_SECTOR_SIZE;
+                
+                if (target_sector == s) {
+                    uint32_t offset = (logical_block * sizeof(uint16_t)) % FLASH_SECTOR_SIZE;
+                    memcpy(&sector_buffer[offset], &l2p_cache[i].physical_block, sizeof(uint16_t));
+                    l2p_cache_dirty[i] = 0;
+                }
+            }
+        }
+        
+        // Embed the header at the very end of the final sector
+        if (s == 3) {
+            l2p_header_t header;
+            l2p_sequence++;
+            header.sequence_number = l2p_sequence;
+            header.last_used_sequence = active_last_used_sequence;
+            header.crc32 = Hardware_CRC32(sector_buffer, FLASH_SECTOR_SIZE - sizeof(l2p_header_t));
+            
+            memcpy(&sector_buffer[FLASH_SECTOR_SIZE - sizeof(l2p_header_t)], &header, sizeof(l2p_header_t));
+        }
+        
+        Flash_Write(inactive_bank + (s * FLASH_SECTOR_SIZE), sector_buffer, FLASH_SECTOR_SIZE);
     }
+    
+    // Atomically swap active bank pointer in RAM
+    active_l2p_bank = inactive_bank;
 }
 
 // Update the L2P mapping
 void FTL_Update_L2P(uint16_t logical_block, uint16_t new_physical_block)
 {
+    __disable_irq();
+    while (ftl_locked) {
+        __enable_irq();
+        __disable_irq();
+    }
+    ftl_locked = 1;
+    __enable_irq();
+
     // 1. Update RAM Cache
     int found = 0;
     for (int i = 0; i < l2p_cache_count; i++)
@@ -199,6 +214,8 @@ void FTL_Update_L2P(uint16_t logical_block, uint16_t new_physical_block)
         l2p_cache_dirty[l2p_cache_count] = 1;
         l2p_cache_count++;
     }
+    
+    ftl_locked = 0;
 }
 
 /************************************************ Journal API **********************************************/
@@ -211,6 +228,7 @@ void FTL_Append_Journal(partition_id_t part_id)
     entry.write_ptr = partitions[part_id].write_ptr;
     entry.oldest_ptr = partitions[part_id].oldest_ptr;
     entry.timestamp = HAL_GetTick();
+    entry.last_used_sequence = active_last_used_sequence;
     entry.crc32 = Calculate_Journal_CRC32(&entry);
 
     uint32_t journal_offset = JOURNAL_START_ADDR + (journal_head * sizeof(journal_entry_t));
@@ -223,7 +241,44 @@ void FTL_Append_Journal(partition_id_t part_id)
 
 int FTL_Init(void)
 {
-    // Phase 5: Boot-Time Recovery Scan
+    // Phase 1: Restore L2P Table from A/B Banks
+    l2p_header_t header_a, header_b;
+    uint8_t buffer_a[FLASH_SECTOR_SIZE];
+    uint8_t buffer_b[FLASH_SECTOR_SIZE];
+    
+    // Read Sector 3 of Bank A (contains header at the end)
+    Flash_Read(L2P_TABLE_BANK_A + (3 * FLASH_SECTOR_SIZE), buffer_a, FLASH_SECTOR_SIZE);
+    memcpy(&header_a, &buffer_a[FLASH_SECTOR_SIZE - sizeof(l2p_header_t)], sizeof(l2p_header_t));
+    uint32_t crc_a = Hardware_CRC32(buffer_a, FLASH_SECTOR_SIZE - sizeof(l2p_header_t));
+    
+    // Read Sector 3 of Bank B
+    Flash_Read(L2P_TABLE_BANK_B + (3 * FLASH_SECTOR_SIZE), buffer_b, FLASH_SECTOR_SIZE);
+    memcpy(&header_b, &buffer_b[FLASH_SECTOR_SIZE - sizeof(l2p_header_t)], sizeof(l2p_header_t));
+    uint32_t crc_b = Hardware_CRC32(buffer_b, FLASH_SECTOR_SIZE - sizeof(l2p_header_t));
+
+    int a_valid = (crc_a == header_a.crc32);
+    int b_valid = (crc_b == header_b.crc32);
+
+    if (a_valid && b_valid) {
+        active_l2p_bank = (header_a.sequence_number > header_b.sequence_number) ? L2P_TABLE_BANK_A : L2P_TABLE_BANK_B;
+        l2p_sequence = (header_a.sequence_number > header_b.sequence_number) ? header_a.sequence_number : header_b.sequence_number;
+        active_last_used_sequence = (header_a.sequence_number > header_b.sequence_number) ? header_a.last_used_sequence : header_b.last_used_sequence;
+    } else if (a_valid) {
+        active_l2p_bank = L2P_TABLE_BANK_A;
+        l2p_sequence = header_a.sequence_number;
+        active_last_used_sequence = header_a.last_used_sequence;
+    } else if (b_valid) {
+        active_l2p_bank = L2P_TABLE_BANK_B;
+        l2p_sequence = header_b.sequence_number;
+        active_last_used_sequence = header_b.last_used_sequence;
+    } else {
+        // Both corrupt (first boot). Format required.
+        active_l2p_bank = L2P_TABLE_BANK_A;
+        l2p_sequence = 0;
+        active_last_used_sequence = 0;
+    }
+
+    // Phase 2: Boot-Time Recovery Scan
     // 1. Scan Journal for latest states
     uint32_t latest_timestamp = 0;
     journal_entry_t latest_entry;
@@ -251,6 +306,11 @@ int FTL_Init(void)
         // Restore active partition pointers from journal
         partitions[latest_entry.partition_id].write_ptr = latest_entry.write_ptr;
         partitions[latest_entry.partition_id].oldest_ptr = latest_entry.oldest_ptr;
+        
+        // Sync Nonce Watermark
+        if (latest_entry.last_used_sequence > active_last_used_sequence) {
+            active_last_used_sequence = latest_entry.last_used_sequence;
+        }
     }
 
     // 2. Scan active physical sectors to verify consistency with L2P table
@@ -261,7 +321,7 @@ int FTL_Init(void)
     for (uint16_t logical = 0; logical < FLASH_SECTOR_COUNT; logical++)
     {
         uint16_t physical_block;
-        Flash_Read(L2P_TABLE_ADDR + (logical * sizeof(uint16_t)), (uint8_t*)&physical_block, sizeof(uint16_t));
+        Flash_Read(active_l2p_bank + (logical * sizeof(uint16_t)), (uint8_t*)&physical_block, sizeof(uint16_t));
         
         if (physical_block != INVALID_BLOCK && physical_block < FLASH_SECTOR_COUNT)
         {
@@ -370,7 +430,7 @@ void FTL_Process_Background(void)
         for (uint16_t log_b = 0; log_b < FLASH_SECTOR_COUNT; log_b++)
         {
             uint16_t phys_b;
-            Flash_Read(L2P_TABLE_ADDR + (log_b * sizeof(uint16_t)), (uint8_t*)&phys_b, sizeof(uint16_t));
+            Flash_Read(active_l2p_bank + (log_b * sizeof(uint16_t)), (uint8_t*)&phys_b, sizeof(uint16_t));
             if (phys_b == min_block) {
                 logical_owner = log_b;
                 break;
@@ -403,7 +463,17 @@ void FTL_Process_Background(void)
         current_erase++;
         Flash_Write(ERASE_COUNT_ADDR + (min_block * sizeof(uint32_t)), (uint8_t*)&current_erase, sizeof(uint32_t));
         
+        __disable_irq();
+        while (ftl_locked) {
+            __enable_irq();
+            __disable_irq();
+        }
+        ftl_locked = 1;
+        __enable_irq();
+
         free_block_bitmap[min_block / 8] |= (1 << (min_block % 8));
+
+        ftl_locked = 0;
     }
 
     // Phase 4: Garbage Collection
@@ -429,7 +499,7 @@ void FTL_Process_Background(void)
         for (uint16_t log_b = 0; log_b < FLASH_SECTOR_COUNT; log_b++)
         {
             uint16_t phys_b;
-            Flash_Read(L2P_TABLE_ADDR + (log_b * sizeof(uint16_t)), (uint8_t*)&phys_b, sizeof(uint16_t));
+            Flash_Read(active_l2p_bank + (log_b * sizeof(uint16_t)), (uint8_t*)&phys_b, sizeof(uint16_t));
             if (phys_b != INVALID_BLOCK && phys_b < FLASH_SECTOR_COUNT) {
                 valid_phys_bitmap[phys_b / 8] |= (1 << (phys_b % 8));
             }
@@ -443,6 +513,14 @@ void FTL_Process_Background(void)
                 int is_valid = (valid_phys_bitmap[phys_b / 8] & (1 << (phys_b % 8)));
                 if (!is_valid)
                 {
+                    __disable_irq();
+                    while (ftl_locked) {
+                        __enable_irq();
+                        __disable_irq();
+                    }
+                    ftl_locked = 1;
+                    __enable_irq();
+
                     // Erase stale block and update wear count
                     Flash_Erase_Sector(phys_b * FLASH_SECTOR_SIZE);
                     
@@ -454,6 +532,7 @@ void FTL_Process_Background(void)
                     // Return to free pool
                     free_block_bitmap[phys_b / 8] |= (1 << (phys_b % 8));
                     
+                    ftl_locked = 0;
                     break; // Reclaim one block per background cycle to avoid stalling
                 }
             }

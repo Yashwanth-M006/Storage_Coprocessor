@@ -27,15 +27,15 @@ Each log type supports **8 Priority Levels (0–7)**.
 ### 3. Custom Flash Translation Layer (FTL)
 The FTL acts as a lightweight file system, completely re-architected into an **SSD-grade Hybrid Wear-Leveling** system to maximize the lifespan of the SPI Flash.
 - **Logical-to-Physical (L2P) Mapping:** To prevent high-frequency partitions from burning out specific physical sectors, the partitions operate on *logical* addresses. When data is written, a Dynamic Allocator selects the absolute least-worn physical block from the free pool. 
-- **Hybrid RAM Cache:** To maintain high performance on the STM32F411, a 10 KB LRU cache holds the active mappings. Cache misses read directly from a persistent mapping table on the flash.
-- **Write-Ahead Journaling (Crash Recovery):** To prevent the superblock from degrading, metadata updates are rapidly appended to a circular Write-Ahead Journal rather than rewriting a sector. On boot, a recovery algorithm scans the journal and active sectors to perfectly reconstruct the state, guaranteeing power-loss tolerance.
-- **Garbage Collection & Static WL:** A background task periodically sweeps the flash. It migrates "cold" stagnant data into "hot" blocks to ensure uniform chip aging (Static Wear-Leveling). Additionally, it compacts stale overwritten sectors and reclaims them to the free pool (Garbage Collection).
+- **Hybrid RAM Cache & Atomic Persistence:** To maintain high performance, a 10 KB LRU cache holds the active mappings in RAM. The flash persistence layer utilizes a **Double-Buffered L2P Table** (Bank A/B). When the cache flushes, it securely commits the active bank with a strictly incrementing Sequence Number and a CRC32 checksum, rendering the system immune to power-loss corruption.
+- **Write-Ahead Journaling:** Partition pointers and high-frequency metadata are rapidly appended to a circular Write-Ahead Journal. On boot, a recovery algorithm scans both the L2P Banks and the Journal to perfectly reconstruct the state.
+- **Thread-Safe Garbage Collection:** A background task periodically sweeps the flash for static wear-leveling and GC. All physical block allocations and pointer updates are heavily guarded by software mutexes and ARM interrupt-disables (`__disable_irq()`) to prevent race conditions from concurrent high-priority SPI traffic.
 
 ### 4. Data Security & Efficiency
 - **Encryption (AES-CTR):** Payloads can be optionally encrypted using AES in Counter (CTR) mode. CTR mode is chosen to avoid data padding (saving space) and utilizes a dynamically generated Nonce.
   - **Master Key Storage:** The 128-bit (16-byte) AES key is loaded into RAM in the global context variable `g_enc_ctx.master_key` when `ENC_SetKey()` is invoked. The system designates a dedicated Flash location at `KEY_FLASH_ADDR` (`0x0807F000U` - Sector 7 of the STM32F411 internal flash) for persistent key storage.
   - **Nonce Generation:** The 12-byte cryptographic nonce is constructed dynamically to guarantee uniqueness:
-    - **Bytes 0–7:** Derived from the 64-bit transaction sequence number (`parser.frame.header.seq`) to ensure sequence uniqueness.
+    - **Bytes 0–7:** Derived from the 64-bit transaction sequence number (`parser.frame.header.seq`) to ensure sequence uniqueness. To prevent AES-CTR nonce reuse attacks across reboots, a "Last Used Sequence" watermark is persistently saved into the Write-Ahead Journal and L2P headers. On boot, any incoming packets with a sequence number lower than this watermark are automatically rejected.
     - **Bytes 8–11:** Computed as a 32-bit XOR hash of the STM32F4 microcontroller's unique 96-bit hardware UID registers (located at `0x1FFF7A10U`) to ensure device uniqueness.
 - **Compression:** An optional compression layer (Delta + Run-Length Encoding) can be enabled to squeeze maximum data into the SPI Flash.
 - *Both are toggled via the Configuration Command (`enc_comp_mode`).*

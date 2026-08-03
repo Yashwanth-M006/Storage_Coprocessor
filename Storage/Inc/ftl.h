@@ -15,15 +15,16 @@
 #define FLASH_SECTOR_COUNT    (FLASH_TOTAL_SIZE / FLASH_SECTOR_SIZE)  // 8192
 
 // Storage zones
-#define FLASH_META_SIZE       (64 * 1024)  // 64 KB reserved at the end of flash
+#define FLASH_META_SIZE       (128 * 1024)  // 128 KB reserved at the end of flash
 #define FLASH_META_START      (FLASH_TOTAL_SIZE - FLASH_META_SIZE)
 #define FLASH_LOG_START       0
 #define FLASH_LOG_SIZE        FLASH_META_START
 
 // Persistent mapping table (in the meta zone)
-#define L2P_TABLE_ADDR        (FLASH_META_START)                              // 16 KB (8192 * 2 bytes)
-#define ERASE_COUNT_ADDR      (FLASH_META_START + 16 * 1024)                  // 32 KB (8192 * 4 bytes)
-#define JOURNAL_START_ADDR    (FLASH_META_START + 48 * 1024)                  // 12 KB Journal
+#define L2P_TABLE_BANK_A      (FLASH_META_START)                              // 16 KB (8192 * 2 bytes)
+#define L2P_TABLE_BANK_B      (FLASH_META_START + 16 * 1024)                  // 16 KB (Alternate Bank)
+#define ERASE_COUNT_ADDR      (FLASH_META_START + 32 * 1024)                  // 32 KB (8192 * 4 bytes)
+#define JOURNAL_START_ADDR    (FLASH_META_START + 64 * 1024)                  // 12 KB Journal
 #define JOURNAL_SIZE          (12 * 1024)
 
 #define INVALID_BLOCK         0xFFFF
@@ -68,10 +69,21 @@ typedef struct __attribute__((packed))
     uint32_t write_ptr;
     uint32_t oldest_ptr;
     uint32_t timestamp;
+    uint64_t last_used_sequence; // Nonce watermark
     uint32_t crc32;
 } journal_entry_t;
 
+typedef struct __attribute__((packed))
+{
+    uint32_t sequence_number;
+    uint64_t last_used_sequence;
+    uint32_t crc32;
+} l2p_header_t;
+
 extern ftl_partition_t partitions[PARTITION_MAX];
+
+// Thread Safety (Mutex equivalent)
+extern volatile uint8_t ftl_locked;
 
 /************************************************ API *************************************************************/
 
