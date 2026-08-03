@@ -18,7 +18,7 @@ extern frame_parser_t parser;
 #define SPI_RX_BUF_SIZE 1024
 
 extern uint8_t spi_rx_buffer[SPI_RX_BUF_SIZE];
-extern uint8_t spi_tx_buffer[SPI_RX_BUF_SIZE];
+extern uint8_t spi_dma_tx_buffer[SPI_RX_BUF_SIZE];
 extern volatile uint16_t spi_rx_old_pos;
 
 /******************************************  Static Memory Pool  *************************************************/

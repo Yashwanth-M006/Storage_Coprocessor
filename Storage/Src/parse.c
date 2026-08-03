@@ -30,12 +30,12 @@ void Init_Overflow_Pool(void)
 
 void Set_SPI_Status_Busy(void)
 {
-    memset(spi_tx_buffer, 0xFF, SPI_RX_BUF_SIZE);
+    memset(spi_dma_tx_buffer, 0xFF, SPI_RX_BUF_SIZE);
 }
 
 void Set_SPI_Status_Ready(void)
 {
-    memset(spi_tx_buffer, 0x00, SPI_RX_BUF_SIZE);
+    memset(spi_dma_tx_buffer, 0x00, SPI_RX_BUF_SIZE);
 }
 
 log_node_t *Alloc_Overflow_Node(void)
@@ -74,14 +74,14 @@ extern SPI_HandleTypeDef hspi1;
 
 uint8_t spi_rx_buffer[SPI_RX_BUF_SIZE];
 
-uint8_t spi_tx_buffer[SPI_RX_BUF_SIZE] = {0};
+uint8_t spi_dma_tx_buffer[SPI_RX_BUF_SIZE] = {0};
 
 volatile uint16_t spi_rx_old_pos = 0;
 
 void Start_Recieve_DMA(void)
 {
     Set_SPI_Status_Ready();
-    HAL_SPI_TransmitReceive_DMA(&hspi1, spi_tx_buffer, spi_rx_buffer, SPI_RX_BUF_SIZE);
+    HAL_SPI_TransmitReceive_DMA(&hspi1, spi_dma_tx_buffer, spi_rx_buffer, SPI_RX_BUF_SIZE);
 }
 
 void SPI1_ProcessBytes(void)
