@@ -24,17 +24,11 @@ Each log type supports **8 Priority Levels (0–7)**.
 - **Overflow Pool Exhaustion:** The coprocessor avoids using `malloc()` to prevent heap fragmentation and hard faults. It is hardcoded to a static overflow pool of `MAX_OVERFLOW_NODES` (64 nodes, utilizing ~17 KB of SRAM). If all 64 overflow nodes are currently in use because the Flash FTL is too slow to catch up with burst SPI traffic, **the system will drop any incoming SPI packets** and return a failure (Option A). Ensure your SPI host respects this backpressure constraint.
 
 ### 3. Custom Flash Translation Layer (FTL)
-The FTL acts as a lightweight file system specifically optimized for SPI Flash logging.
-- **Dynamic Partitioning:** The physical flash memory is divided into 4 partitions (one for each Log Type). The percentage size of each partition is dynamically configurable via the host master (3 bits per partition, representing multiples of 10%).
-- **Storage Policies (Modes):**
-  - **`FTL_MODE_STOP`:** Halts logging for a specific partition when it becomes completely full.
-  - **`FTL_MODE_CIRCULAR`:** Operates as a ring buffer. When the partition fills up, it actively erases the oldest 4KB sector and overwrites it with new data.
-- **Partition Boundary Wrapping:** To prevent a log record (header + payload) from being split across the physical boundaries of a partition, the FTL calculates remaining space before writing. If the record exceeds the space, the FTL pads the remainder of the partition with `0xFF`, resets the write pointer (`write_ptr`) back to the partition's `start_addr`, and writes the record sequentially.
-- **Fail-Safe Dual-Bank Superblock (A/B Toggle):** To prevent corruption of system metadata in the event of a power failure while updating pointers, the FTL uses a dual-bank configuration strategy. 
-  - Two dedicated sectors (**Sector 0** and **Sector 1**) are allocated for storing the superblock.
-  - Each superblock contains an incrementing `version` number and a `crc` checksum validated via the Hardware CRC peripheral.
-  - When saving configuration updates or pointer progress, the system writes to the inactive sector and verifies the checksum. Only after verification does it logically swap the active sector pointer.
-  - Upon boot, `FTL_Init()` reads both sectors, checks the CRC of both, and runs from the bank with the highest valid version number.
+The FTL acts as a lightweight file system, completely re-architected into an **SSD-grade Hybrid Wear-Leveling** system to maximize the lifespan of the SPI Flash.
+- **Logical-to-Physical (L2P) Mapping:** To prevent high-frequency partitions from burning out specific physical sectors, the partitions operate on *logical* addresses. When data is written, a Dynamic Allocator selects the absolute least-worn physical block from the free pool. 
+- **Hybrid RAM Cache:** To maintain high performance on the STM32F411, a 10 KB LRU cache holds the active mappings. Cache misses read directly from a persistent mapping table on the flash.
+- **Write-Ahead Journaling (Crash Recovery):** To prevent the superblock from degrading, metadata updates are rapidly appended to a circular Write-Ahead Journal rather than rewriting a sector. On boot, a recovery algorithm scans the journal and active sectors to perfectly reconstruct the state, guaranteeing power-loss tolerance.
+- **Garbage Collection & Static WL:** A background task periodically sweeps the flash. It migrates "cold" stagnant data into "hot" blocks to ensure uniform chip aging (Static Wear-Leveling). Additionally, it compacts stale overwritten sectors and reclaims them to the free pool (Garbage Collection).
 
 ### 4. Data Security & Efficiency
 - **Encryption (AES-CTR):** Payloads can be optionally encrypted using AES in Counter (CTR) mode. CTR mode is chosen to avoid data padding (saving space) and utilizes a dynamically generated Nonce.

@@ -9,88 +9,76 @@
 
 #include "Config.h"
 
-
+// Flash characteristics
 #define FLASH_TOTAL_SIZE      (32UL * 1024 * 1024)
 #define FLASH_SECTOR_SIZE     4096
-#define FLASH_META_SECTORS    16
+#define FLASH_SECTOR_COUNT    (FLASH_TOTAL_SIZE / FLASH_SECTOR_SIZE)  // 8192
 
-#define FLASH_META_SIZE       (FLASH_META_SECTORS * FLASH_SECTOR_SIZE)
-#define FLASH_LOG_START       FLASH_META_SIZE
-#define FLASH_LOG_SIZE        (FLASH_TOTAL_SIZE - FLASH_META_SIZE)
+// Storage zones
+#define FLASH_META_SIZE       (64 * 1024)  // 64 KB reserved at the end of flash
+#define FLASH_META_START      (FLASH_TOTAL_SIZE - FLASH_META_SIZE)
+#define FLASH_LOG_START       0
+#define FLASH_LOG_SIZE        FLASH_META_START
 
-#define SUPERBLOCK_SECTOR_0_ADDR 0
-#define SUPERBLOCK_SECTOR_1_ADDR FLASH_SECTOR_SIZE
+// Persistent mapping table (in the meta zone)
+#define L2P_TABLE_ADDR        (FLASH_META_START)                              // 16 KB (8192 * 2 bytes)
+#define ERASE_COUNT_ADDR      (FLASH_META_START + 16 * 1024)                  // 32 KB (8192 * 4 bytes)
+#define JOURNAL_START_ADDR    (FLASH_META_START + 48 * 1024)                  // 12 KB Journal
+#define JOURNAL_SIZE          (12 * 1024)
 
-#define FTL_MAGIC             0xA5A5F1F1
-#define FTL_RECORD_MAGIC      0xDEADBEEF
+#define INVALID_BLOCK         0xFFFF
 
+// Caches (RAM)
+#define L2P_CACHE_ENTRIES     2500 // ~10 KB in RAM (LRU)
+
+typedef struct {
+    uint16_t logical_block;
+    uint16_t physical_block;
+} l2p_cache_entry_t;
+
+// Logical partitions
 typedef enum
 {
     FTL_MODE_STOP = 0,
     FTL_MODE_CIRCULAR
-
 } ftl_mode_t;
 
 typedef struct
 {
-	uint8_t  ftl_mode;
-    uint32_t start_addr;
-    uint32_t end_addr;
-    uint32_t write_ptr;
-    uint32_t oldest_ptr;    // Used only in circular mode.
-    uint32_t sector_count;
-
+    uint8_t  ftl_mode;
+    uint32_t start_logical_addr;
+    uint32_t end_logical_addr;
+    uint32_t write_ptr;     // Logical write pointer
+    uint32_t oldest_ptr;    // Logical oldest pointer
+    uint32_t logical_sectors;
 } ftl_partition_t;
 
 // stored in the partition followed by the block header and payload
 typedef struct __attribute__((packed))
 {
-    log_type_t 	log_type;
-    uint16_t 	length;
-    uint32_t 	crc;
-
+    log_type_t  log_type;
+    uint16_t    length;
+    uint32_t    crc;
 } ftl_record_header_t;
 
-//  stored  at beginning of flash
 typedef struct __attribute__((packed))
 {
-    uint32_t magic;
-    uint32_t version;
-    uint8_t  erase_policy;                       // 0: Lazy erase, 1: Pre-erase
-    uint8_t  partition_percent[PARTITION_MAX];   // How much flash memory each partition gets
-    uint8_t  log_to_partition[LOG_TYPE_MAX];	 // Which partition each log type should go into.
-    uint8_t  partiton_mode[PARTITION_MAX];		// The storage mode of each partition.
-    uint32_t write_ptrs[PARTITION_MAX];
-    uint32_t oldest_ptrs[PARTITION_MAX];
-    uint32_t crc;
-
-} ftl_superblock_t;
-
-// just a handle structure
-typedef struct{
-	ftl_superblock_t ftl_super;
-	uint8_t  storage_mode;        // bitmask
-    uint16_t partition_map;       // 4 bits per partition
-    //uint32_t storage_limit_bytes; // total usable bytes
-
-}ftl_superblock_handle_t ;
-
-
+    uint32_t partition_id;
+    uint32_t state_version;
+    uint32_t write_ptr;
+    uint32_t oldest_ptr;
+    uint32_t timestamp;
+    uint32_t crc32;
+} journal_entry_t;
 
 extern ftl_partition_t partitions[PARTITION_MAX];
-//extern ftl_superblock_t superblock;
-extern ftl_superblock_handle_t superblock_handle ;
-//extern ftl_mode_t ftl_mode;
-
-
 
 /************************************************ API *************************************************************/
 
 int FTL_Init(void);
 int FTL_Config(config_payload_t *config);
-int  FTL_Append(uint8_t log_type, uint8_t *data, uint16_t len);
-int  FTL_Read_By_Type(uint8_t log_type, uint8_t *buffer, uint16_t buffer_size);
-
-//void FTL_SetMode(ftl_mode_t mode);
+int FTL_Append(uint8_t log_type, uint8_t *data, uint16_t len);
+int FTL_Read_By_Type(uint8_t log_type, uint8_t *buffer, uint16_t buffer_size);
+void FTL_Process_Background(void); // Periodic GC and WL check
 
 #endif

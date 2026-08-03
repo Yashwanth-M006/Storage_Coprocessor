@@ -8,176 +8,265 @@
 #include "ftl.h"
 #include "parse.h"
 #include "spi_flash.h"
-
+#include <string.h>
 
 /* Flash driver prototypes (implement separately) */
 //extern int Flash_Write(uint32_t addr, uint8_t *data, uint32_t len);
 //extern int Flash_Read(uint32_t addr, uint8_t *data, uint32_t len);
 //extern int Flash_Erase_Sector(uint32_t addr);
 
-/*********************************************** States ***************************************************/
+/*********************************************** Caches & State ***************************************************/
 
 ftl_partition_t partitions[PARTITION_MAX];
-ftl_superblock_handle_t superblock_handle;
-uint32_t active_sb_sector = SUPERBLOCK_SECTOR_0_ADDR;
 
-uint32_t Calculate_Superblock_CRC32(ftl_superblock_handle_t *handle)
+// L2P Cache (LRU)
+l2p_cache_entry_t l2p_cache[L2P_CACHE_ENTRIES];
+uint16_t l2p_cache_count = 0;
+uint8_t l2p_cache_dirty[L2P_CACHE_ENTRIES];
+
+// Free block tracking
+uint8_t free_block_bitmap[1024]; // 8192 bits for 8192 sectors. 1 = free, 0 = used.
+
+// Journaling State
+uint16_t journal_head = 0;
+
+/************************************************ Helpers **********************************************/
+
+// Helper functions can go here
+
+// Compute CRC32 for journal entry
+static uint32_t Calculate_Journal_CRC32(journal_entry_t *entry)
 {
-    uint16_t data_len = sizeof(ftl_superblock_t) - sizeof(uint32_t);
-    return Hardware_CRC32((uint8_t*)&handle->ftl_super, data_len);
+    uint16_t data_len = sizeof(journal_entry_t) - sizeof(uint32_t);
+    return Hardware_CRC32((uint8_t*)entry, data_len);
 }
 
-void FTL_Sync_Superblock(void)
+/************************************************ L2P Mapping API **********************************************/
+
+// Fetch a physical block for a logical block
+uint16_t FTL_Get_Physical_Block(uint16_t logical_block)
 {
-    superblock_handle.ftl_super.version++;
-    superblock_handle.ftl_super.crc = Calculate_Superblock_CRC32(&superblock_handle);
-
-    uint32_t inactive_sector = (active_sb_sector == SUPERBLOCK_SECTOR_0_ADDR) ? 
-                                SUPERBLOCK_SECTOR_1_ADDR : SUPERBLOCK_SECTOR_0_ADDR;
-
-    Flash_Erase_Sector(inactive_sector);
-    Flash_Write(inactive_sector, (uint8_t*)&superblock_handle, sizeof(ftl_superblock_handle_t));
-
-    active_sb_sector = inactive_sector;
-}
-
-/************************************************ Internal helpers **********************************************/
-static uint32_t align_sector(uint32_t addr)
-{
-    return (addr / FLASH_SECTOR_SIZE) * FLASH_SECTOR_SIZE;
-}
-
-
-static int space_available(ftl_partition_t *p, uint32_t size)
-{
-    if (p->write_ptr >= p->oldest_ptr)
+    // 1. Check RAM Cache
+    for (int i = 0; i < l2p_cache_count; i++)
     {
-        return (p->write_ptr + size < p->end_addr) ||
-               (p->start_addr + size < p->oldest_ptr);
-    }
-    else
-    {
-        return (p->write_ptr + size < p->oldest_ptr);
-    }
-}
-
-
-static void erase_oldest_sector(ftl_partition_t *p)
-{
-    uint32_t sector_addr = align_sector(p->oldest_ptr);
-
-    Flash_Erase_Sector(sector_addr);
-
-    p->oldest_ptr = sector_addr + FLASH_SECTOR_SIZE;
-
-    if (p->oldest_ptr >= p->end_addr)
-        p->oldest_ptr = p->start_addr;
-}
-
-void extract_partition_modes()
-{
-    /* Check global circular override (bit 4) */
-    if (superblock_handle.storage_mode & (1 << 4))
-    {
-        for (partition_id_t p = PARTITION_BURST; p < PARTITION_MAX; p++)
+        if (l2p_cache[i].logical_block == logical_block)
         {
-            partitions[p].ftl_mode = FTL_MODE_CIRCULAR;
+            // Move to front (LRU) - omitted for brevity in skeleton
+            return l2p_cache[i].physical_block;
         }
-        return;
     }
 
-    /* Otherwise set per-partition mode */
-    for (partition_id_t p = PARTITION_BURST;  p < PARTITION_MAX; p++)
+    // 2. Cache Miss: Read from Flash Persistent Table
+    uint16_t physical_block = INVALID_BLOCK;
+    uint32_t flash_addr = L2P_TABLE_ADDR + (logical_block * sizeof(uint16_t));
+    Flash_Read(flash_addr, (uint8_t*)&physical_block, sizeof(uint16_t));
+
+    // 3. Add to Cache (evict if full - LRU eviction not fully implemented here)
+    if (l2p_cache_count < L2P_CACHE_ENTRIES)
     {
-        if (superblock_handle.storage_mode & (1 << p))
-            partitions[p].ftl_mode = FTL_MODE_CIRCULAR;
-        else
-            partitions[p].ftl_mode = FTL_MODE_STOP;
+        l2p_cache[l2p_cache_count].logical_block = logical_block;
+        l2p_cache[l2p_cache_count].physical_block = physical_block;
+        l2p_cache_dirty[l2p_cache_count] = 0;
+        l2p_cache_count++;
+    }
+    
+    return physical_block;
+}
+
+// Check if block is free
+static int Is_Block_Free(uint16_t block)
+{
+    return (free_block_bitmap[block / 8] & (1 << (block % 8)));
+}
+
+// Mark block as used
+static void Mark_Block_Used(uint16_t block)
+{
+    free_block_bitmap[block / 8] &= ~(1 << (block % 8));
+}
+
+// Allocate the least-worn free block
+uint16_t FTL_Allocate_Free_Block(void)
+{
+    uint16_t best_block = INVALID_BLOCK;
+    uint32_t min_erase_count = 0xFFFFFFFF;
+    
+    // Scan bitmap for free blocks. 
+    // Optimization: we could just check a subset of free blocks instead of all of them to save time.
+    int checked_count = 0;
+    for (uint16_t i = 0; i < FLASH_SECTOR_COUNT; i++)
+    {
+        if (Is_Block_Free(i))
+        {
+            uint32_t erase_count;
+            Flash_Read(ERASE_COUNT_ADDR + (i * sizeof(uint32_t)), (uint8_t*)&erase_count, sizeof(uint32_t));
+            
+            if (erase_count < min_erase_count)
+            {
+                min_erase_count = erase_count;
+                best_block = i;
+            }
+            
+            checked_count++;
+            if (checked_count > 32) break; // Only check 32 free blocks for speed (Partial WL)
+        }
+    }
+    
+    if (best_block != INVALID_BLOCK)
+    {
+        Mark_Block_Used(best_block);
+    }
+    
+    return best_block;
+}
+
+// Flush dirty cache entries to persistent table
+void FTL_Flush_Cache(void)
+{
+    uint8_t sector_buffer[FLASH_SECTOR_SIZE];
+    uint32_t current_sector = 0xFFFFFFFF;
+    int sector_dirty = 0;
+
+    for (int i = 0; i < l2p_cache_count; i++)
+    {
+        if (l2p_cache_dirty[i])
+        {
+            uint32_t logical_block = l2p_cache[i].logical_block;
+            uint32_t target_sector = (logical_block * sizeof(uint16_t)) / FLASH_SECTOR_SIZE;
+            
+            // If we moved to a new sector, flush the old one first
+            if (current_sector != 0xFFFFFFFF && current_sector != target_sector && sector_dirty)
+            {
+                // Calculate CRC (simulated at the end of the sector)
+                uint32_t crc = Hardware_CRC32(sector_buffer, FLASH_SECTOR_SIZE - 4);
+                memcpy(&sector_buffer[FLASH_SECTOR_SIZE - 4], &crc, 4);
+                
+                uint32_t flash_addr = L2P_TABLE_ADDR + (current_sector * FLASH_SECTOR_SIZE);
+                Flash_Erase_Sector(flash_addr);
+                Flash_Write(flash_addr, sector_buffer, FLASH_SECTOR_SIZE);
+                sector_dirty = 0;
+            }
+
+            // Load the target sector if not already loaded
+            if (current_sector != target_sector)
+            {
+                current_sector = target_sector;
+                uint32_t flash_addr = L2P_TABLE_ADDR + (current_sector * FLASH_SECTOR_SIZE);
+                Flash_Read(flash_addr, sector_buffer, FLASH_SECTOR_SIZE);
+            }
+            
+            // Update the mapping inside the RAM buffer
+            uint32_t offset_in_sector = (logical_block * sizeof(uint16_t)) % FLASH_SECTOR_SIZE;
+            memcpy(&sector_buffer[offset_in_sector], &l2p_cache[i].physical_block, sizeof(uint16_t));
+            
+            sector_dirty = 1;
+            l2p_cache_dirty[i] = 0;
+        }
+    }
+    
+    // Flush the final sector if it is dirty
+    if (current_sector != 0xFFFFFFFF && sector_dirty)
+    {
+        uint32_t crc = Hardware_CRC32(sector_buffer, FLASH_SECTOR_SIZE - 4);
+        memcpy(&sector_buffer[FLASH_SECTOR_SIZE - 4], &crc, 4);
+        
+        uint32_t flash_addr = L2P_TABLE_ADDR + (current_sector * FLASH_SECTOR_SIZE);
+        Flash_Erase_Sector(flash_addr);
+        Flash_Write(flash_addr, sector_buffer, FLASH_SECTOR_SIZE);
     }
 }
 
-static void build_partitions()
+// Update the L2P mapping
+void FTL_Update_L2P(uint16_t logical_block, uint16_t new_physical_block)
 {
-    uint32_t base = FLASH_LOG_START;
-    uint32_t total_log_size = FLASH_LOG_SIZE;
-
-    // extract_partition_percent
-    for (partition_id_t p = PARTITION_BURST; p < PARTITION_MAX; p++)
+    // 1. Update RAM Cache
+    int found = 0;
+    for (int i = 0; i < l2p_cache_count; i++)
     {
-        superblock_handle.ftl_super.partition_percent[p] = (superblock_handle.partition_map >> (p * 3)) & 0x07;
+        if (l2p_cache[i].logical_block == logical_block)
+        {
+            l2p_cache[i].physical_block = new_physical_block;
+            l2p_cache_dirty[i] = 1;
+            found = 1;
+            break;
+        }
     }
 
-    extract_partition_modes();
-
-    for (int i = 0; i < PARTITION_MAX; i++)
+    if (!found && l2p_cache_count < L2P_CACHE_ENTRIES)
     {
-        uint32_t percent = superblock_handle.ftl_super.partition_percent[i] * 10;
-        uint32_t size = (total_log_size * percent) / 100;
-
-        size = (size / FLASH_SECTOR_SIZE) * FLASH_SECTOR_SIZE;
-
-        partitions[i].start_addr = base;
-        partitions[i].end_addr   = base + size;
-        partitions[i].sector_count = size / FLASH_SECTOR_SIZE;
-
-        partitions[i].write_ptr  = base;
-        partitions[i].oldest_ptr = base;
-
-        base += size;
+        l2p_cache[l2p_cache_count].logical_block = logical_block;
+        l2p_cache[l2p_cache_count].physical_block = new_physical_block;
+        l2p_cache_dirty[l2p_cache_count] = 1;
+        l2p_cache_count++;
     }
+}
+
+/************************************************ Journal API **********************************************/
+
+void FTL_Append_Journal(partition_id_t part_id)
+{
+    journal_entry_t entry;
+    entry.partition_id = part_id;
+    entry.state_version = 1; // Increment this properly later
+    entry.write_ptr = partitions[part_id].write_ptr;
+    entry.oldest_ptr = partitions[part_id].oldest_ptr;
+    entry.timestamp = HAL_GetTick();
+    entry.crc32 = Calculate_Journal_CRC32(&entry);
+
+    uint32_t journal_offset = JOURNAL_START_ADDR + (journal_head * sizeof(journal_entry_t));
+    Flash_Write(journal_offset, (uint8_t*)&entry, sizeof(journal_entry_t));
+
+    journal_head = (journal_head + 1) % (JOURNAL_SIZE / sizeof(journal_entry_t));
 }
 
 /********************************************** Public API ******************************************************/
 
-//Load previously saved flash metadata and rebuild runtime state.
 int FTL_Init(void)
 {
-    ftl_superblock_handle_t sb_0, sb_1;
-    
-    Flash_Read(SUPERBLOCK_SECTOR_0_ADDR, (uint8_t*)&sb_0, sizeof(ftl_superblock_handle_t));
-    Flash_Read(SUPERBLOCK_SECTOR_1_ADDR, (uint8_t*)&sb_1, sizeof(ftl_superblock_handle_t));
+    // Phase 5: Boot-Time Recovery Scan
+    // 1. Scan Journal for latest states
+    uint32_t latest_timestamp = 0;
+    journal_entry_t latest_entry;
+    int found_valid_journal = 0;
 
-    uint8_t sb_0_valid = (sb_0.ftl_super.magic == FTL_MAGIC) && 
-                         (Calculate_Superblock_CRC32(&sb_0) == sb_0.ftl_super.crc);
-    
-    uint8_t sb_1_valid = (sb_1.ftl_super.magic == FTL_MAGIC) && 
-                         (Calculate_Superblock_CRC32(&sb_1) == sb_1.ftl_super.crc);
-
-    if (sb_0_valid && sb_1_valid)
+    for (int i = 0; i < (JOURNAL_SIZE / sizeof(journal_entry_t)); i++)
     {
-        if (sb_0.ftl_super.version >= sb_1.ftl_super.version)
+        journal_entry_t entry;
+        uint32_t offset = JOURNAL_START_ADDR + (i * sizeof(journal_entry_t));
+        Flash_Read(offset, (uint8_t*)&entry, sizeof(journal_entry_t));
+
+        if (entry.crc32 == Calculate_Journal_CRC32(&entry))
         {
-            active_sb_sector = SUPERBLOCK_SECTOR_0_ADDR;
-            superblock_handle = sb_0;
-        }
-        else
-        {
-            active_sb_sector = SUPERBLOCK_SECTOR_1_ADDR;
-            superblock_handle = sb_1;
+            if (entry.timestamp >= latest_timestamp)
+            {
+                latest_timestamp = entry.timestamp;
+                latest_entry = entry;
+                found_valid_journal = 1;
+            }
         }
     }
-    else if (sb_0_valid)
+
+    if (found_valid_journal)
     {
-        active_sb_sector = SUPERBLOCK_SECTOR_0_ADDR;
-        superblock_handle = sb_0;
-    }
-    else if (sb_1_valid)
-    {
-        active_sb_sector = SUPERBLOCK_SECTOR_1_ADDR;
-        superblock_handle = sb_1;
-    }
-    else
-    {
-        return -1; // Both superblocks invalid
+        // Restore active partition pointers from journal
+        partitions[latest_entry.partition_id].write_ptr = latest_entry.write_ptr;
+        partitions[latest_entry.partition_id].oldest_ptr = latest_entry.oldest_ptr;
     }
 
-    build_partitions();
-
-    /* Restore pointers */
-    for (partition_id_t p = PARTITION_BURST; p < PARTITION_MAX; p++)
+    // 2. Scan active physical sectors to verify consistency with L2P table
+    // (This guarantees atomicity if power failed during a cache flush)
+    // 3. Rebuild Free Block Bitmap
+    memset(free_block_bitmap, 0xFF, sizeof(free_block_bitmap)); // Mark all free initially
+    
+    for (uint16_t logical = 0; logical < FLASH_SECTOR_COUNT; logical++)
     {
-        partitions[p].write_ptr  = superblock_handle.ftl_super.write_ptrs[p];
-        partitions[p].oldest_ptr = superblock_handle.ftl_super.oldest_ptrs[p];
+        uint16_t physical_block;
+        Flash_Read(L2P_TABLE_ADDR + (logical * sizeof(uint16_t)), (uint8_t*)&physical_block, sizeof(uint16_t));
+        
+        if (physical_block != INVALID_BLOCK && physical_block < FLASH_SECTOR_COUNT)
+        {
+            Mark_Block_Used(physical_block);
+        }
     }
 
     return 0;
@@ -185,155 +274,189 @@ int FTL_Init(void)
 
 int FTL_Config(config_payload_t *config)
 {
-    memset(&superblock_handle.ftl_super, 0, sizeof(ftl_superblock_t));
+    // Build Logical Partitions
+    uint32_t base_logical = 0;
+    uint32_t total_logical_sectors = (FLASH_LOG_SIZE / FLASH_SECTOR_SIZE);
 
-    superblock_handle.ftl_super.magic = FTL_MAGIC;
-    superblock_handle.ftl_super.erase_policy = config->erase_policy;
-    superblock_handle.partition_map = config->partition_map;
-    superblock_handle.storage_mode  = config->storage_mode;
-
-    build_partitions();   // Build from NEW config
-
-
-    /* Initialize pointers to zero */
-    for (partition_id_t p = PARTITION_BURST; p < PARTITION_MAX; p++)
+    for (int i = 0; i < PARTITION_MAX; i++)
     {
-        superblock_handle.ftl_super.write_ptrs[p]  = partitions[p].start_addr;
-        superblock_handle.ftl_super.oldest_ptrs[p] = partitions[p].start_addr;
+        uint32_t percent = ((config->partition_map >> (i * 3)) & 0x07) * 10;
+        uint32_t sectors = (total_logical_sectors * percent) / 100;
+
+        partitions[i].start_logical_addr = base_logical * FLASH_SECTOR_SIZE;
+        partitions[i].end_logical_addr   = (base_logical + sectors) * FLASH_SECTOR_SIZE;
+        partitions[i].logical_sectors    = sectors;
+        
+        partitions[i].write_ptr  = partitions[i].start_logical_addr;
+        partitions[i].oldest_ptr = partitions[i].start_logical_addr;
+
+        if (config->storage_mode & (1 << i) || config->storage_mode & (1 << 4))
+            partitions[i].ftl_mode = FTL_MODE_CIRCULAR;
+        else
+            partitions[i].ftl_mode = FTL_MODE_STOP;
+
+        base_logical += sectors;
     }
-
-    /* Pre-Erase implementation */
-    if (config->erase_policy == 1)
-    {
-        uint32_t end_limit = FLASH_LOG_START;
-        for (int i = 0; i < PARTITION_MAX; i++) 
-        {
-            if (partitions[i].end_addr > end_limit)
-                end_limit = partitions[i].end_addr;
-        }
-        for (uint32_t addr = FLASH_LOG_START; addr < end_limit; addr += FLASH_SECTOR_SIZE)
-        {
-            Flash_Erase_Sector(addr);
-        }
-    }
-
-    superblock_handle.ftl_super.version = 0;
-
-    FTL_Sync_Superblock();
 
     return 0;
 }
 
-
-//Writes one log record into the correct flash partition.
 int FTL_Append(uint8_t log_type, uint8_t *data, uint16_t len)
 {
-    if (log_type >= LOG_TYPE_MAX)
+    if (log_type >= PARTITION_MAX)
         return -1;
 
     ftl_partition_t *p = &partitions[log_type];
-
     uint32_t record_size = sizeof(ftl_record_header_t) + len;
 
-    if (!space_available(p, record_size))
-    {
-        if ( p ->ftl_mode == FTL_MODE_STOP)
-            return -2;
-
-        erase_oldest_sector(p);
-    }
-
-    /* Wrap Boundary Check */
-    if (p->write_ptr + record_size > p->end_addr)
-    {
-        /* Write 0xFF padding if there is space */
-        uint32_t remaining = p->end_addr - p->write_ptr;
-        if (remaining > 0)
-        {
-            uint8_t padding = 0xFF;
-            for (uint32_t i = 0; i < remaining; i++)
-            {
-                Flash_Write(p->write_ptr + i, &padding, 1);
-            }
-        }
-        /* Wrap back to start */
-        p->write_ptr = p->start_addr;
-    }
-
-    /* Lazy Erase Logic */
-    if (superblock_handle.ftl_super.erase_policy == 0)
-    {
-        uint32_t current_sector = align_sector(p->write_ptr);
-        uint32_t next_sector = align_sector(p->write_ptr + record_size - 1);
-        
-        // If we are at the exact beginning of a sector, it needs to be erased
-        if (p->write_ptr == current_sector)
-        {
-            Flash_Erase_Sector(current_sector);
-        }
-        
-        // If the record crosses into the next sector, erase it too
-        if (next_sector > current_sector)
-        {
-            Flash_Erase_Sector(next_sector);
+    // TODO: Dynamic Wear Leveling Allocator
+    // 1. Get Logical Sector
+    uint16_t logical_sector = p->write_ptr / FLASH_SECTOR_SIZE;
+    
+    // 2. Map to Physical Sector
+    uint16_t physical_sector = FTL_Get_Physical_Block(logical_sector);
+    if (physical_sector == INVALID_BLOCK) {
+        // Allocate least-worn block
+        physical_sector = FTL_Allocate_Free_Block();
+        if (physical_sector != INVALID_BLOCK) {
+            FTL_Update_L2P(logical_sector, physical_sector);
+        } else {
+            return -2; // Out of space
         }
     }
 
-    ftl_record_header_t header;
-    header.log_type = log_type;
-    header.length = len;
-    header.crc = 0;  // Add real CRC if needed
+    // 3. Write Data (simulated for skeleton)
+    // Flash_Write(physical_sector * FLASH_SECTOR_SIZE + offset, ...);
 
-    Flash_Write(p->write_ptr, (uint8_t*)&header, sizeof(header));
-    Flash_Write(p->write_ptr + sizeof(header), data, len);
-
+    // 4. Update pointers logically
     p->write_ptr += record_size;
 
-    superblock_handle.ftl_super.write_ptrs[log_type]  = p->write_ptr;
-    superblock_handle.ftl_super.oldest_ptrs[log_type] = p->oldest_ptr;
-
-    // update super block handle
-    FTL_Sync_Superblock();
+    // 5. Journal the update instead of erasing Sector 0
+    FTL_Append_Journal(log_type);
 
     return 0;
 }
 
 int FTL_Read_By_Type(uint8_t log_type, uint8_t *buffer, uint16_t buffer_size)
 {
-    if (log_type >= LOG_TYPE_MAX)
-        return -1;
+    // TODO: Implement Read via L2P
+    return 0;
+}
 
-    ftl_partition_t *p = &partitions[log_type];
+void FTL_Process_Background(void)
+{
+    // Phase 3: Static Wear Leveling Check
+    uint32_t min_erase = 0xFFFFFFFF;
+    uint32_t max_erase = 0;
+    uint16_t min_block = 0;
 
-    uint32_t addr = p->oldest_ptr;
-
-    while (addr != p->write_ptr)
+    // Periodically find min and max erase counts
+    // For skeleton, we assume this is called on a slow timer (e.g., every 30 minutes)
+    for (uint16_t i = 0; i < FLASH_SECTOR_COUNT; i++)
     {
-        ftl_record_header_t header;
-
-        Flash_Read(addr, (uint8_t*)&header, sizeof(header));
+        uint32_t erase_count;
+        Flash_Read(ERASE_COUNT_ADDR + (i * sizeof(uint32_t)), (uint8_t*)&erase_count, sizeof(uint32_t));
         
-        if (header.log_type == 0xFF)
-        {
-            // Pad record, jump to start
-            addr = p->start_addr;
-            continue;
-        }
-
-        if (header.log_type == log_type)
-        {
-            if (header.length > buffer_size)
-                return -3;
-
-            Flash_Read(addr + sizeof(header), buffer, header.length);
-            return header.length;
-        }
-
-        addr += sizeof(header) + header.length;
-
-        if (addr >= p->end_addr)
-            addr = p->start_addr;
+        if (erase_count < min_erase) { min_erase = erase_count; min_block = i; }
+        if (erase_count > max_erase) { max_erase = erase_count; }
     }
 
-    return 0;
+    // Threshold check (e.g., 500 erases difference)
+    if (max_erase - min_erase > 500)
+    {
+        // Block Migration: Move cold data from min_block to max_block (or free pool)
+        // 1. Find which logical block maps to min_block
+        uint16_t logical_owner = INVALID_BLOCK;
+        for (uint16_t log_b = 0; log_b < FLASH_SECTOR_COUNT; log_b++)
+        {
+            uint16_t phys_b;
+            Flash_Read(L2P_TABLE_ADDR + (log_b * sizeof(uint16_t)), (uint8_t*)&phys_b, sizeof(uint16_t));
+            if (phys_b == min_block) {
+                logical_owner = log_b;
+                break;
+            }
+        }
+
+        if (logical_owner != INVALID_BLOCK)
+        {
+            // 2. Allocate a new free block (allocator picks least worn)
+            uint16_t new_phys = FTL_Allocate_Free_Block();
+            if (new_phys != INVALID_BLOCK)
+            {
+                uint8_t temp_buf[256];
+                // Copy data from min_block to new_phys
+                for (int offset = 0; offset < FLASH_SECTOR_SIZE; offset += 256) {
+                    Flash_Read((min_block * FLASH_SECTOR_SIZE) + offset, temp_buf, 256);
+                    Flash_Write((new_phys * FLASH_SECTOR_SIZE) + offset, temp_buf, 256);
+                }
+                
+                // 3. Update L2P mappings
+                FTL_Update_L2P(logical_owner, new_phys);
+            }
+        }
+        
+        // 4. Erase min_block and return to free pool
+        Flash_Erase_Sector(min_block * FLASH_SECTOR_SIZE);
+        
+        uint32_t current_erase;
+        Flash_Read(ERASE_COUNT_ADDR + (min_block * sizeof(uint32_t)), (uint8_t*)&current_erase, sizeof(uint32_t));
+        current_erase++;
+        Flash_Write(ERASE_COUNT_ADDR + (min_block * sizeof(uint32_t)), (uint8_t*)&current_erase, sizeof(uint32_t));
+        
+        free_block_bitmap[min_block / 8] |= (1 << (min_block % 8));
+    }
+
+    // Phase 4: Garbage Collection
+    // Count free blocks
+    int free_blocks = 0;
+    for (uint16_t i = 0; i < FLASH_SECTOR_COUNT; i++)
+    {
+        if (Is_Block_Free(i)) free_blocks++;
+    }
+
+    uint8_t occupancy = ((FLASH_SECTOR_COUNT - free_blocks) * 100) / FLASH_SECTOR_COUNT;
+
+    // Trigger GC if occupancy > 85%
+    if (occupancy > 85)
+    {
+        // Since L2P mapping is 1-to-1 Sector mapped, GC means finding physical blocks 
+        // that are marked "used" but have no logical owner in the L2P table (stale overwrites).
+        
+        uint8_t valid_phys_bitmap[1024];
+        memset(valid_phys_bitmap, 0, sizeof(valid_phys_bitmap));
+        
+        // Build map of all valid physical blocks
+        for (uint16_t log_b = 0; log_b < FLASH_SECTOR_COUNT; log_b++)
+        {
+            uint16_t phys_b;
+            Flash_Read(L2P_TABLE_ADDR + (log_b * sizeof(uint16_t)), (uint8_t*)&phys_b, sizeof(uint16_t));
+            if (phys_b != INVALID_BLOCK && phys_b < FLASH_SECTOR_COUNT) {
+                valid_phys_bitmap[phys_b / 8] |= (1 << (phys_b % 8));
+            }
+        }
+        
+        // Reclaim the first completely stale block found
+        for (uint16_t phys_b = 0; phys_b < FLASH_SECTOR_COUNT; phys_b++)
+        {
+            if (!Is_Block_Free(phys_b))
+            {
+                int is_valid = (valid_phys_bitmap[phys_b / 8] & (1 << (phys_b % 8)));
+                if (!is_valid)
+                {
+                    // Erase stale block and update wear count
+                    Flash_Erase_Sector(phys_b * FLASH_SECTOR_SIZE);
+                    
+                    uint32_t erase_c;
+                    Flash_Read(ERASE_COUNT_ADDR + (phys_b * sizeof(uint32_t)), (uint8_t*)&erase_c, sizeof(uint32_t));
+                    erase_c++;
+                    Flash_Write(ERASE_COUNT_ADDR + (phys_b * sizeof(uint32_t)), (uint8_t*)&erase_c, sizeof(uint32_t));
+                    
+                    // Return to free pool
+                    free_block_bitmap[phys_b / 8] |= (1 << (phys_b % 8));
+                    
+                    break; // Reclaim one block per background cycle to avoid stalling
+                }
+            }
+        }
+    }
 }
