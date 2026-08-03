@@ -18,6 +18,7 @@ extern frame_parser_t parser;
 #define SPI_RX_BUF_SIZE 1024
 
 extern uint8_t spi_rx_buffer[SPI_RX_BUF_SIZE];
+extern uint8_t spi_tx_buffer[SPI_RX_BUF_SIZE];
 extern volatile uint16_t spi_rx_old_pos;
 
 /******************************************  Static Memory Pool  *************************************************/
@@ -28,6 +29,10 @@ void Free_Overflow_Node(log_node_t *node);
 /********************************************  APIs  **********************************************************/
 
 void Start_Recieve_DMA(void);
+
+// Backpressure Status
+void Set_SPI_Status_Busy(void);
+void Set_SPI_Status_Ready(void);
 
 // Poll DMA Pointer
 void SPI1_ProcessBytes(void);

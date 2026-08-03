@@ -28,21 +28,44 @@ void Init_Overflow_Pool(void)
     pool_initialized = 1;
 }
 
+void Set_SPI_Status_Busy(void)
+{
+    memset(spi_tx_buffer, 0xFF, SPI_RX_BUF_SIZE);
+}
+
+void Set_SPI_Status_Ready(void)
+{
+    memset(spi_tx_buffer, 0x00, SPI_RX_BUF_SIZE);
+}
+
 log_node_t *Alloc_Overflow_Node(void)
 {
-    if (overflow_free_list == NULL)
+    if (overflow_free_list == NULL) {
+        Set_SPI_Status_Busy();
         return NULL;
+    }
     
     log_node_t *node = overflow_free_list;
     overflow_free_list = overflow_free_list->next;
+    
+    if (overflow_free_list == NULL) {
+        Set_SPI_Status_Busy();
+    }
     return node;
 }
 
 void Free_Overflow_Node(log_node_t *node)
 {
     if (node == NULL) return;
+    
+    int was_empty = (overflow_free_list == NULL);
+    
     node->next = overflow_free_list;
     overflow_free_list = node;
+    
+    if (was_empty) {
+        Set_SPI_Status_Ready();
+    }
 }
 
 frame_parser_t parser;
@@ -51,11 +74,14 @@ extern SPI_HandleTypeDef hspi1;
 
 uint8_t spi_rx_buffer[SPI_RX_BUF_SIZE];
 
+uint8_t spi_tx_buffer[SPI_RX_BUF_SIZE] = {0};
+
 volatile uint16_t spi_rx_old_pos = 0;
 
 void Start_Recieve_DMA(void)
 {
-	HAL_SPI_Receive_DMA(&hspi1, spi_rx_buffer, SPI_RX_BUF_SIZE);
+    Set_SPI_Status_Ready();
+    HAL_SPI_TransmitReceive_DMA(&hspi1, spi_tx_buffer, spi_rx_buffer, SPI_RX_BUF_SIZE);
 }
 
 void SPI1_ProcessBytes(void)

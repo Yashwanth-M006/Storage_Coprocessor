@@ -20,8 +20,9 @@ Incoming data is categorized dynamically. The coprocessor manages 4 dedicated lo
 Each log type supports **8 Priority Levels (0–7)**.
 - **Dynamic Queue Allocation (Overflow Handling):** If a priority queue's static capacity (`MAX_RECORDS`) is exceeded, the coprocessor automatically allocates a temporary queue node from a **Static Memory Pool** (capacity: 64 nodes). These are safely processed and deallocated in a FIFO manner once the flash writer catches up, preventing data loss.
 
-### System Limitations
-- **Overflow Pool Exhaustion:** The coprocessor avoids using `malloc()` to prevent heap fragmentation and hard faults. It is hardcoded to a static overflow pool of `MAX_OVERFLOW_NODES` (64 nodes, utilizing ~17 KB of SRAM). If all 64 overflow nodes are currently in use because the Flash FTL is too slow to catch up with burst SPI traffic, **the system will drop any incoming SPI packets** and return a failure (Option A). Ensure your SPI host respects this backpressure constraint.
+### System Limitations & Backpressure
+- **Overflow Pool Exhaustion:** The coprocessor avoids using `malloc()` to prevent heap fragmentation and hard faults. It is hardcoded to a static overflow pool of `MAX_OVERFLOW_NODES` (64 nodes, utilizing ~17 KB of SRAM). 
+- **SPI Status Protocol (Ready/Busy):** If the FTL is too slow to catch up with burst SPI traffic and all 64 overflow nodes become occupied, the coprocessor invokes a hardware backpressure protocol. It instantly flips its continuous SPI DMA transmit buffer from `0x00` (Ready) to `0xFF` (Busy). The SPI Host should monitor the MISO line during transmission; if it reads `0xFF`, it knows the coprocessor is overwhelmed and the current packet was dropped. The status reverts to `0x00` once memory frees up.
 
 ### 3. Custom Flash Translation Layer (FTL)
 The FTL acts as a lightweight file system, completely re-architected into an **SSD-grade Hybrid Wear-Leveling** system to maximize the lifespan of the SPI Flash.
